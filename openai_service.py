@@ -1,8 +1,8 @@
 import openai
-from typing import List, Dict, Generator, Optional, Union
+from typing import List, Dict, Generator, Optional, Union, AsyncGenerator
 import json
 import logging
-from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError
+from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError, AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 # Set up logging
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class OpenAIService:
     def __init__(self):
-        self.client: Optional[OpenAI] = None
+        self.client: Optional[AsyncOpenAI] = None
         self.initialized = False
 
     def _ensure_initialized(self):
@@ -51,10 +51,10 @@ class OpenAIService:
             f"'context_size': {sanitized_config.get('context_size')}\n"
         )
 
-    def initialize_with_config(self, api_key: str, base_url: Optional[str] = None):
+    async def initialize_with_config(self, api_key: str, base_url: Optional[str] = None):
         """Initialize client with specific configuration"""
         try:
-            self.client = OpenAI(
+            self.client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url if base_url else "https://api.deepseek.com/v1"
             )
@@ -68,7 +68,7 @@ class OpenAIService:
             logger.error(f"Failed to initialize OpenAI client with custom config: {e}")
             raise
 
-    def create_chat_completion_stream(
+    async def create_chat_completion_stream(
             self,
             messages: List[ChatCompletionMessageParam],
             model: str = "deepseek-chat",
@@ -76,7 +76,7 @@ class OpenAIService:
             max_tokens: int = 1000,
             bot_config: Optional[Dict] = None,
             **kwargs
-    ) -> Generator[Dict, None, None]:
+    ) -> AsyncGenerator[Dict, None]:
         """
         Create a streaming chat completion using OpenAI API
 
@@ -92,67 +92,26 @@ class OpenAIService:
             Dictionary with content chunks or error information
         """
         self._ensure_initialized()
-        print(80 * "=")
-        print(f"Bot: {bot_config}")
-        print()
-        print(f"Model: {model}")
-        print(f"Temperature: {temperature}")
-        print(f"Max Tokens: {max_tokens}")
-        print(f"Kwargs: {kwargs}")
-        print(80 * "=")
-
         try:
-            # Make the streaming API call
-            stream = self.client.chat.completions.create(
+            async with self.client.chat.completions.stream(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                stream=True,
                 **kwargs
-            )
-
-            # Stream the response
-            for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield {
-                        "content": chunk.choices[0].delta.content,
-                        "error": None
-                    }
-
-
-
+            ) as stream:
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield {"content": chunk.choices[0].delta.content, "error": None}
 
         except RateLimitError as e:
-            self._log_error_with_context("create_chat_completion_stream", e, bot_config)
-            yield {
-                "content": None,
-                "error": f"Rate limit exceeded. Please try again later. {e}"
-            }
+            yield {"content": None, "error": f"Rate limit exceeded: {e}"}
         except AuthenticationError as e:
-            self._log_error_with_context("create_chat_completion_stream", e, bot_config)
-            yield {
-                "content": None,
-                "error": f"Authentication failed. Please check your API key. {e}"
-            }
-        except APIConnectionError as e:
-            self._log_error_with_context("create_chat_completion_stream", e, bot_config)
-            yield {
-                "content": None,
-                "error": f"Connection error. Please check your network connection. {e}"
-            }
-        except APIError as e:
-            self._log_error_with_context("create_chat_completion_stream", e, bot_config)
-            yield {
-                "content": None,
-                "error": f"API error: {e}"
-            }
+            yield {"content": None, "error": f"Authentication failed: {e}"}
+        except (APIConnectionError, APIError) as e:
+            yield {"content": None, "error": f"API error: {e}"}
         except Exception as e:
-            self._log_error_with_context("create_chat_completion_stream", e, bot_config)
-            yield {
-                "content": None,
-                "error": f"Unexpected error: {e}"
-            }
+            yield {"content": None, "error": f"Unexpected error: {e}"}
 
     def create_chat_completion(
             self,

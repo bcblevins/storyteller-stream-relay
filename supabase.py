@@ -19,3 +19,22 @@ async def get_bot(user_id: str, bot_id: int):
     if not data:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Bot not found or unauthorized")
     return data[0]
+
+
+
+async def post_message(message: dict):
+    """Write a message record to Supabase REST endpoint."""
+    url = f"{settings.supabase_rest_url}/messages"
+    headers = {
+        "apikey": settings.supabase_service_role_key,
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "Content-Type": "application/json",
+        # merge duplicates on conflict if unique index exists
+        "Prefer": "resolution=merge-duplicates,return=representation",
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, headers=headers, json=message)
+        if resp.status_code not in (200, 201):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase insert failed: {resp.text}")
+        return resp.json()

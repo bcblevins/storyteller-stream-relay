@@ -2,12 +2,11 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
-import httpx, asyncio, json, time, logging
-from openai import AsyncOpenAI
+import json, time, logging, asyncio
 
 from openai_service import openai_service
 from auth import verify_jwt
-from supabase import get_bot
+from supabase import get_bot, post_message
 
 app = FastAPI(title="Storytellr Relay", version="0.1")
 
@@ -31,6 +30,30 @@ app.add_middleware(
 log = logging.getLogger("relay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+user_buckets: dict[str, dict] = {}
+
+
+async def safe_post(msg):
+    for attempt in range(3):
+        try:
+            return await post_message(msg)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            log.warning(f"Retrying Supabase write ({attempt+1}/3): {e}")
+            await asyncio.sleep(1)
+    return None
+
+
+def check_rate_limit(user_id: str, limit=5, window=60):
+    now = time.time()
+    bucket = user_buckets.setdefault(user_id, {"count": 0, "reset": now + window})
+    if now > bucket["reset"]:
+        bucket.update({"count": 0, "reset": now + window})
+    bucket["count"] += 1
+    if bucket["count"] > limit:
+        raise HTTPException(429, f"Rate limit exceeded ({limit}/min)")
+
 # --- Health endpoint ---
 @app.get("/healthz")
 async def health_check():
@@ -52,15 +75,12 @@ async def stream(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
-    # Verify JWT
     user_id = await verify_jwt(request)
 
-    # Fetch bot credentials from Supabase
     bot = await get_bot(user_id, payload["bot_id"])
 
-    # Initialize the OpenAI client
     try:
-        openai_service.initialize_with_config(
+        await openai_service.initialize_with_config(
             api_key=bot["access_key"],
             base_url=bot.get("access_path")
         )
@@ -84,48 +104,57 @@ async def stream(request: Request):
         ping_interval = 15
         last_ping = time.time()
 
-        # Run sync generator in a threadpool to not block FastAPI’s event loop
-        loop = asyncio.get_event_loop()
-        stream_gen = await loop.run_in_executor(
-            None,
-            lambda: openai_service.create_chat_completion_stream(
+        try:
+            async for chunk in openai_service.create_chat_completion_stream(
                 messages=messages,
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 bot_config=bot
-            )
-        )
+            ):
+                if await request.is_disconnected():
+                    log.info(f"Client disconnected early: {stream_id}")
+                    break
 
-        # The above returns a *generator*, not a list, so we’ll iterate directly.
-        # To avoid blocking the loop, we’ll handle each chunk asynchronously.
+                if chunk.get("error"):
+                    yield {"event": "error", "data": json.dumps({
+                        "error": chunk["error"],
+                        "stream_id": stream_id
+                    })}
+                    break
 
-        for chunk in stream_gen:
-            if await request.is_disconnected():
-                log.info(f"Client disconnected: {stream_id}")
-                break
+                token = chunk.get("content")
+                if token:
+                    buffer.append(token)
+                    yield {"event": "token", "data": token}
 
-            if chunk.get("error"):
-                yield {
-                    "event": "error",
-                    "data": json.dumps({
-                        "stream_id": stream_id,
-                        "error": chunk["error"]
-                    }),
-                }
-                break
+                # periodic ping (good for Cloudflare Tunnel stability)
+                if time.time() - last_ping > ping_interval:
+                    yield {"event": "ping", "data": ""}
+                    last_ping = time.time()
+        finally:
+            yield {"event": "done", "data": json.dumps({"stream_id": stream_id})}
+            log.info(f"Stream complete ({stream_id}) - {len(buffer)} tokens")
 
-            token = chunk.get("content")
-            if token:
-                buffer.append(token)
-                yield {"event": "token", "data": token}
+            # after final yield, persist message
+            final_text = "".join(buffer)
+            msg_record = {
+                "user_id": user_id,
+                "conversation_id": payload.get("conversation_id"),
+                "content": final_text,
+                "is_user_author": False,
+                "is_streaming": False,
+                "is_complete": True,
+                "stream_id": stream_id,
+            }
 
-            # keepalive ping
-            if time.time() - last_ping > ping_interval:
-                yield {"event": "ping", "data": ""}
-                last_ping = time.time()
+            try:
+                if await request.is_disconnected():
+                    log.info(f"Stream aborted {stream_id}")
+                await safe_post(msg_record)
+                log.info(f"Message persisted for stream {stream_id}")
+            except Exception as e:
+                log.error(f"Failed to persist message {stream_id}: {e}")
 
-        yield {"event": "done", "data": json.dumps({"stream_id": stream_id})}
-        log.info(f"Stream complete ({stream_id}) - {len(buffer)} tokens")
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
