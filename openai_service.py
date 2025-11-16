@@ -92,6 +92,7 @@ class OpenAIService:
             Dictionary with content chunks or error information
         """
         self._ensure_initialized()
+        count = 0
         try:
             async with self.client.chat.completions.stream(
                 model=model,
@@ -100,9 +101,59 @@ class OpenAIService:
                 max_tokens=max_tokens,
                 **kwargs
             ) as stream:
-                async for chunk in stream:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        yield {"content": chunk.choices[0].delta.content, "error": None}
+                count = 0
+                async for event in stream:
+                    et = getattr(event, "type", None)
+                    count+=1
+                    # --- Modern event API ---
+                    if et == "content.delta":
+                        text = getattr(event, "delta", None)
+                        if text:
+                            yield {"content": text, "error": None}
+                        continue
+
+                    # If you ever want to surface "thinking" tokens:
+                    # NOTE: This is causing duplicates.
+                    # if hasattr(event, "chunk"):
+                    #     ch = event.chunk
+                    #     if getattr(ch, "choices", None):
+                    #         delta = ch.choices[0].delta
+                    #         if getattr(delta, "reasoning_content", None):
+                    #             yield {
+                    #                 "content": delta.reasoning_content,
+                    #                 "event": "reasoning",
+                    #                 "error": None,
+                    #             }
+                    #             continue
+                    #         elif getattr(delta, "content", None):
+                    #             yield {"content": delta.content, "event": "token", "error": None}
+                    #             continue
+
+                    if et == "message.stop":
+                        break
+
+                    # --- ChunkEvent wrapper (ChatCompletionChunk) ---
+                    # if hasattr(event, "chunk"):
+                    #     ch = event.chunk
+                    #     if getattr(ch, "choices", None):
+                    #         delta = ch.choices[0].delta
+                    #         # Prefer standard content
+                    #         if getattr(delta, "content", None):
+                    #             yield {"content": delta.content, "error": None}
+                    #         # Or ignore reasoning content (uncomment to surface)
+                    #         # elif getattr(delta, "reasoning_content", None):
+                    #         #     yield {"content": delta.reasoning_content, "reasoning": True, "error": None}
+                    #     continue
+
+                    # --- Legacy OpenAI 0.x path (rare now) ---
+                    if getattr(event, "choices", None):
+                        delta = event.choices[0].delta
+                        if getattr(delta, "content", None):
+                            yield {"content": delta.content, "error": None}
+                        continue
+                    
+
+
 
         except RateLimitError as e:
             yield {"content": None, "error": f"Rate limit exceeded: {e}"}
@@ -221,4 +272,4 @@ class OpenAIService:
 
 
 # Global instance for easy access
-openai_service = OpenAIService()
+openai_service = OpenAIService()#

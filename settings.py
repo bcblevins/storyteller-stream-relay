@@ -1,10 +1,10 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    supabase_url: str
-    supabase_jwks_url: str
-    supabase_rest_url: str
-    supabase_service_role_key: str
+    SUPABASE_URL: str
+    SUPABASE_JWT_SECRET: str
+    SUPABASE_REST_URL: str
+    SUPABASE_SERVICE_ROLE_KEY: str
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
