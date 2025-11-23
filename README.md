@@ -63,6 +63,10 @@ SUPABASE_URL=https://<project>.supabase.co
 SUPABASE_JWKS_URL=https://<project>.supabase.co/auth/v1/keys
 SUPABASE_REST_URL=https://<project>.supabase.co/rest/v1
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+# Optional CORS overrides
+CORS_EXTRA_ORIGINS=https://www.storytellr.me,https://app.storytellr.me
+# Leave blank to disable regex override
+CORS_ALLOW_ORIGIN_REGEX=
 ```
 
 ---

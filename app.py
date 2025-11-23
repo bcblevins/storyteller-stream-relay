@@ -1,34 +1,72 @@
 # app.py
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
-import json, time, logging, asyncio
+import json, time, logging, asyncio, os
 
 from openai_service import openai_service
 from auth import verify_jwt
-from supabase import get_bot, get_default_bot, get_conversation_bot, post_message, post_message_alternative, get_message, update_message_alternative
+from supabase import get_bot, get_default_bot, get_conversation_bot, post_message, post_message_alternative, get_message, update_message_alternative, get_message_by_stream_id
 
 app = FastAPI(title="Storytellr Relay", version="0.1")
 
-# --- CORS configuration ---
-origins = [
-    "http://localhost:5173",   # Vite dev server
-    "http://127.0.0.1:5173",
+# --- CORS configuration (mirrors legacy Flask server defaults) ---
+default_cors_origins = [
+    "http://localhost:5173",
     "http://localhost:5174",
-    "http://127.0.0.1:5174",
-    "https://storytellr.me",   # production frontend
+    "https://storytellr.me",
+    "https://storytellr.me/",
+    "https://dev.storytellr.me",
+    "https://dev.storytellr.me/",
 ]
+
+extra_origins_raw = os.getenv("CORS_EXTRA_ORIGINS", "")
+extra_origins = [origin.strip() for origin in extra_origins_raw.split(",") if origin.strip()]
+allowed_origins = default_cors_origins + extra_origins
+
+
+def _normalize_origin(origin: str | None) -> str | None:
+    if not origin:
+        return None
+    return origin.rstrip("/")
+
+
+allowed_origin_set = {_normalize_origin(o) for o in allowed_origins if _normalize_origin(o)}
+
+
+log = logging.getLogger("relay")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def apply_cors_headers(response: Response, request: Request) -> Response:
+    origin = request.headers.get("origin")
+    normalized = _normalize_origin(origin)
+    if normalized and normalized in allowed_origin_set:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers.setdefault("Vary", "Origin")
+
+        if request.method == "OPTIONS":
+            request_headers = request.headers.get("access-control-request-headers")
+            if request_headers:
+                response.headers["Access-Control-Allow-Headers"] = request_headers
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+
+    else:
+        log.warning("CORS origin blocked or missing: %s", origin)
+    return response
+
+origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip() or None
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=allowed_origins,
+    allow_origin_regex=origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-log = logging.getLogger("relay")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 user_buckets: dict[str, dict] = {}
 
@@ -88,22 +126,31 @@ async def stream(request: Request):
         raise HTTPException(400, "Invalid JSON")
 
     user_id = await verify_jwt(request)
+    log.info("Stream request - User: %s, conversation_id: %s, messages_count: %d", 
+             user_id, payload.get("conversation_id"), len(payload.get("messages", [])))
 
     # ---- Resolve bot: explicit -> conversation -> default ----
     bot = None
     desired_bot_id = payload.get("bot_id")
     conversation_id = payload.get("conversation_id")
     messages = payload.get("messages", [])
-    print(f"RECIEVED Conversation ID: {conversation_id}")
+    log.debug("Bot resolution - desired_bot_id: %s, conversation_id: %s, messages_count: %d", 
+             desired_bot_id, conversation_id, len(messages))
 
     if isinstance(desired_bot_id, int):
+        log.debug("Using explicit bot_id: %s", desired_bot_id)
         bot = await get_bot(user_id, desired_bot_id)
     elif isinstance(conversation_id, int):
+        log.debug("Using conversation bot for conversation_id: %s", conversation_id)
         bot = await get_conversation_bot(user_id, conversation_id)
         if bot is None:
+            log.debug("No conversation bot found, falling back to default bot")
             bot = await get_default_bot(user_id)
     else:
+        log.debug("Using default bot")
         bot = await get_default_bot(user_id)
+    
+    log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
     # ---- Initialize provider client from bot config ----
     try:
@@ -114,11 +161,7 @@ async def stream(request: Request):
     except Exception as e:
         raise HTTPException(500, f"Failed to init OpenAI client: {e}")
 
-    # What is this. Why would we do this.
-    # messages = [
-    #     {"role": "system", "content": payload.get("system", "")},
-    #     {"role": "user", "content": payload.get("prompt", "")},
-    # ]
+    log.debug("Messages to send to OpenAI: %s", messages)
 
     model = bot.get("model", "deepseek-chat")
     temperature = bot.get("temperature", 0.7)
@@ -128,6 +171,9 @@ async def stream(request: Request):
     # Check if this is an alternative message stream
     is_alternative = payload.get("is_alternative", False)
     alternative_id = payload.get("alternative_id")
+    
+    log.info("Stream configuration - model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s",
+             model, temperature, max_tokens, stream_id, is_alternative, alternative_id)
 
     async def event_gen():
         buffer = []
@@ -145,10 +191,11 @@ async def stream(request: Request):
             ):
                 if await request.is_disconnected():
                     aborted = True
-                    log.info(f"Client disconnected early: {stream_id}")
+                    log.info("Client disconnected early - stream_id: %s", stream_id)
                     break
 
                 if chunk.get("error"):
+                    log.error("OpenAI streaming error: %s", chunk["error"])
                     yield {"event": "error", "data": json.dumps({
                         "error": chunk["error"],
                         "stream_id": stream_id
@@ -166,7 +213,7 @@ async def stream(request: Request):
         finally:
             # Always send 'done' so the adapter completes cleanly
             yield {"event": "done", "data": json.dumps({"stream_id": stream_id})}
-            log.info(f"Stream complete ({stream_id}) - {len(buffer)} tokens")
+            log.info("Stream complete - stream_id: %s, tokens: %d, aborted: %s", stream_id, len(buffer), aborted)
 
             # Persist message after completion/abort
             final_text = "".join(buffer)
@@ -180,10 +227,11 @@ async def stream(request: Request):
                         "is_complete": (not aborted),
                         "stream_id": stream_id
                     }
+                    log.debug("Updating alternative message - alternative_id: %s", alternative_id)
                     await update_message_alternative(alternative_id, updates)
-                    log.info(f"Alternative message {alternative_id} updated for stream {stream_id}")
+                    log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
                 except Exception as e:
-                    log.error(f"Failed to update alternative message {alternative_id}: {e}")
+                    log.error("Failed to update alternative message - alternative_id: %s, error: %s", alternative_id, e)
             else:
                 # Create new regular message
                 msg_record = {
@@ -198,11 +246,12 @@ async def stream(request: Request):
 
                 try:
                     if aborted:
-                        log.info(f"Stream aborted {stream_id}")
+                        log.info("Stream aborted - stream_id: %s", stream_id)
+                    log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
                     await safe_post(msg_record)
-                    log.info(f"Message persisted for stream {stream_id}")
+                    log.info("Message persisted - stream_id: %s", stream_id)
                 except Exception as e:
-                    log.error(f"Failed to persist message {stream_id}: {e}")
+                    log.error("Failed to persist message - stream_id: %s, error: %s", stream_id, e)
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
@@ -215,7 +264,9 @@ async def reroll_message(request: Request):
     """
     try:
         payload = await request.json()
-    except Exception:
+        log.info("Reroll endpoint - Request received")
+    except Exception as e:
+        log.error("Reroll endpoint - Failed to parse JSON payload: %s", e)
         raise HTTPException(400, "Invalid JSON")
 
     user_id = await verify_jwt(request)
@@ -223,17 +274,54 @@ async def reroll_message(request: Request):
     parent_message_id = payload.get("parent_message_id")
     conversation_id = payload.get("conversation_id")
     
+    log.info("Reroll endpoint - user_id: %s, parent_message_id: %s, conversation_id: %s", 
+             user_id, parent_message_id, conversation_id)
+    
     # Validate required fields
     if not parent_message_id:
+        log.error("Reroll endpoint - Missing required field: parent_message_id")
         raise HTTPException(400, "parent_message_id is required")
     if not conversation_id:
+        log.error("Reroll endpoint - Missing required field: conversation_id")
         raise HTTPException(400, "conversation_id is required")
     
-    # Verify user owns the parent message
-    try:
-        parent_message = await get_message(parent_message_id, user_id)
-    except HTTPException:
-        raise HTTPException(404, "Parent message not found or unauthorized")
+    # Check if this is a temporary message ID (from streaming)
+    # Convert to string for temporary ID check, but keep original type for database operations
+    is_temporary_id = str(parent_message_id).startswith('temp-')
+    actual_parent_message_id = parent_message_id
+    
+    # If it's a temporary ID, we need to find the actual message by stream_id
+    if is_temporary_id:
+        log.debug("Reroll endpoint - Temporary message ID detected: %s", parent_message_id)
+        # Extract stream_id from temporary message ID (format: temp-stream-{timestamp}-{random})
+        if str(parent_message_id).startswith('temp-stream-'):
+            # The temporary ID itself is the stream_id used during streaming
+            stream_id = parent_message_id
+            log.debug("Reroll endpoint - Looking up message by stream_id: %s", stream_id)
+            try:
+                # Import the function to get message by stream_id
+                from supabase import get_message_by_stream_id
+                parent_message = await get_message_by_stream_id(stream_id, user_id)
+                actual_parent_message_id = parent_message['id']
+                log.debug("Reroll endpoint - Found actual message ID: %s for stream_id: %s", actual_parent_message_id, stream_id)
+            except HTTPException as e:
+                log.error("Reroll endpoint - Failed to find message by stream_id: %s, error: %s", stream_id, e.detail)
+                raise HTTPException(404, f"Temporary message not yet persisted. Please wait a moment and try again.")
+        else:
+            log.error("Reroll endpoint - Unsupported temporary message ID format: %s", parent_message_id)
+            raise HTTPException(400, "Unsupported temporary message ID format")
+    else:
+        # Normal message ID lookup
+        try:
+            log.debug("Reroll endpoint - Calling get_message with parent_message_id: %s, user_id: %s", parent_message_id, user_id)
+            parent_message = await get_message(parent_message_id, user_id)
+            log.debug("Reroll endpoint - get_message result: %s", parent_message)
+        except HTTPException as e:
+            log.error("Reroll endpoint - get_message failed with HTTPException: %s, status_code: %s", e.detail, e.status_code)
+            raise HTTPException(404, "Parent message not found or unauthorized")
+        except Exception as e:
+            log.error("Reroll endpoint - get_message failed with unexpected error: %s", e)
+            raise HTTPException(500, f"Internal server error: {str(e)}")
     
     # Verify this is an AI message (only AI messages can be rerolled)
     if parent_message.get("is_user_author"):
@@ -246,7 +334,7 @@ async def reroll_message(request: Request):
     alternative_record = {
         "user_id": user_id,
         "conversation_id": conversation_id,
-        "parent_message_id": parent_message_id,
+        "parent_message_id": actual_parent_message_id,
         "content": "",  # Start with empty content for streaming
         "is_user_author": False,  # AI messages
         "is_streaming": True,
@@ -260,12 +348,12 @@ async def reroll_message(request: Request):
         alternative_response = await safe_post_alternative(alternative_record)
         alternative_message = alternative_response[0] if isinstance(alternative_response, list) else alternative_response
         
-        log.info(f"Created alternative message {alternative_message['id']} for parent {parent_message_id}")
+        log.info("Created alternative message - id: %s, parent_message_id: %s", alternative_message['id'], actual_parent_message_id)
         
         return {
             "alternative_message": {
                 "id": alternative_message["id"],
-                "parent_message_id": parent_message_id,
+                "parent_message_id": actual_parent_message_id,
                 "conversation_id": conversation_id,
                 "content": "",
                 "is_user_author": False,
@@ -278,5 +366,5 @@ async def reroll_message(request: Request):
         }
         
     except Exception as e:
-        log.error(f"Failed to create alternative message: {e}")
+        log.error("Failed to create alternative message: %s", e)
         raise HTTPException(500, f"Failed to create alternative message: {str(e)}")
