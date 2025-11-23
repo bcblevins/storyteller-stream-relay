@@ -118,6 +118,27 @@ async def auth_test(request: Request, bot_id: int):
     return {"user_id": user_id, "bot": bot["name"] if "name" in bot else bot["id"]}
 
 
+@app.get("/v1/message-by-stream-id")
+async def message_by_stream_id(request: Request, stream_id: str):
+    """
+    Lookup a persisted message by its stream_id.
+    Useful for clients that started streaming with a temporary ID and need
+    the real message id after persistence.
+    """
+    user_id = await verify_jwt(request)
+    if not stream_id:
+        raise HTTPException(400, "stream_id is required")
+    try:
+        message = await get_message_by_stream_id(stream_id, user_id)
+        return {"message": message}
+    except HTTPException as e:
+        # Pass through known errors (e.g., not found)
+        raise e
+    except Exception as e:
+        log.error("Failed to get message by stream_id: %s", e)
+        raise HTTPException(500, "Failed to get message by stream_id")
+
+
 @app.post("/v1/stream")
 async def stream(request: Request):
     try:
@@ -211,16 +232,17 @@ async def stream(request: Request):
                     yield {"event": "ping", "data": ""}
                     last_ping = time.time()
         finally:
-            # Always send 'done' so the adapter completes cleanly
-            yield {"event": "done", "data": json.dumps({"stream_id": stream_id})}
             log.info("Stream complete - stream_id: %s, tokens: %d, aborted: %s", stream_id, len(buffer), aborted)
 
-            # Persist message after completion/abort
+            # Persist message before sending final 'done' so the client can reconcile IDs.
+            # Shield the persistence step so it still runs even if the client disconnects
+            # and Starlette cancels the streaming task.
             final_text = "".join(buffer)
-            
-            if is_alternative and alternative_id:
-                # Update existing alternative message
-                try:
+
+            async def persist_and_build_done_payload():
+                done_payload = {"stream_id": stream_id}
+                if is_alternative and alternative_id:
+                    # Update existing alternative message
                     updates = {
                         "content": final_text,
                         "is_streaming": False,
@@ -229,29 +251,48 @@ async def stream(request: Request):
                     }
                     log.debug("Updating alternative message - alternative_id: %s", alternative_id)
                     await update_message_alternative(alternative_id, updates)
+                    done_payload.update({"alternative_id": alternative_id})
                     log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
-                except Exception as e:
-                    log.error("Failed to update alternative message - alternative_id: %s, error: %s", alternative_id, e)
-            else:
-                # Create new regular message
-                msg_record = {
-                    "user_id": user_id,
-                    "conversation_id": conversation_id,
-                    "content": final_text,
-                    "is_user_author": False,
-                    "is_streaming": False,
-                    "is_complete": (not aborted),
-                    "stream_id": stream_id,
-                }
+                else:
+                    # Create new regular message
+                    msg_record = {
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                        "content": final_text,
+                        "is_user_author": False,
+                        "is_streaming": False,
+                        "is_complete": (not aborted),
+                        "stream_id": stream_id,
+                    }
 
-                try:
                     if aborted:
                         log.info("Stream aborted - stream_id: %s", stream_id)
                     log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
-                    await safe_post(msg_record)
-                    log.info("Message persisted - stream_id: %s", stream_id)
-                except Exception as e:
-                    log.error("Failed to persist message - stream_id: %s, error: %s", stream_id, e)
+                    persisted = await safe_post(msg_record)
+                    # Supabase REST returns a list when Prefer return=representation
+                    if isinstance(persisted, list) and persisted:
+                        persisted_id = persisted[0].get("id")
+                    elif isinstance(persisted, dict):
+                        persisted_id = persisted.get("id")
+                    else:
+                        persisted_id = None
+                    if persisted_id:
+                        done_payload.update({"message_id": persisted_id})
+                    log.info("Message persisted - stream_id: %s, message_id: %s", stream_id, persisted_id)
+
+                return done_payload
+
+            try:
+                done_payload = await asyncio.shield(persist_and_build_done_payload())
+            except asyncio.CancelledError:
+                log.warning("Persistence shield cancelled - stream_id: %s", stream_id)
+                done_payload = {"stream_id": stream_id, "error": "persist_cancelled"}
+            except Exception as e:
+                log.error("Failed to persist message - stream_id: %s, error: %s", stream_id, e)
+                done_payload = {"stream_id": stream_id, "error": "persist_failed"}
+
+            # Always send 'done' so the adapter completes cleanly (include IDs when available)
+            yield {"event": "done", "data": json.dumps(done_payload)}
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
