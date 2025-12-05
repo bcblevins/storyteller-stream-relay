@@ -19,6 +19,7 @@ default_cors_origins = [
     "https://storytellr.me/",
     "https://dev.storytellr.me",
     "https://dev.storytellr.me/",
+    "https://storyteller-elv.pages.dev"
 ]
 
 extra_origins_raw = os.getenv("CORS_EXTRA_ORIGINS", "")
