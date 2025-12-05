@@ -71,10 +71,10 @@ app.add_middleware(
 user_buckets: dict[str, dict] = {}
 
 
-async def safe_post(msg):
+async def safe_post(msg, token: str):
     for attempt in range(3):
         try:
-            return await post_message(msg)
+            return await post_message(msg, token)
         except Exception as e:
             if attempt == 2:
                 raise
@@ -83,11 +83,11 @@ async def safe_post(msg):
     return None
 
 
-async def safe_post_alternative(alternative):
+async def safe_post_alternative(alternative, token: str):
     """Safe alternative message posting with retry logic"""
     for attempt in range(3):
         try:
-            return await post_message_alternative(alternative)
+            return await post_message_alternative(alternative, token)
         except Exception as e:
             if attempt == 2:
                 raise
@@ -113,8 +113,8 @@ async def health_check():
 
 @app.get("/auth/test")
 async def auth_test(request: Request, bot_id: int):
-    user_id = await verify_jwt(request)
-    bot = await get_bot(user_id, bot_id)
+    user_id, auth_token = await verify_jwt(request)
+    bot = await get_bot(user_id, bot_id, auth_token)
     return {"user_id": user_id, "bot": bot["name"] if "name" in bot else bot["id"]}
 
 
@@ -125,11 +125,11 @@ async def message_by_stream_id(request: Request, stream_id: str):
     Useful for clients that started streaming with a temporary ID and need
     the real message id after persistence.
     """
-    user_id = await verify_jwt(request)
+    user_id, auth_token = await verify_jwt(request)
     if not stream_id:
         raise HTTPException(400, "stream_id is required")
     try:
-        message = await get_message_by_stream_id(stream_id, user_id)
+        message = await get_message_by_stream_id(stream_id, user_id, auth_token)
         return {"message": message}
     except HTTPException as e:
         # Pass through known errors (e.g., not found)
@@ -146,7 +146,7 @@ async def stream(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
-    user_id = await verify_jwt(request)
+    user_id, auth_token = await verify_jwt(request)
     log.info("Stream request - User: %s, conversation_id: %s, messages_count: %d", 
              user_id, payload.get("conversation_id"), len(payload.get("messages", [])))
 
@@ -160,16 +160,16 @@ async def stream(request: Request):
 
     if isinstance(desired_bot_id, int):
         log.debug("Using explicit bot_id: %s", desired_bot_id)
-        bot = await get_bot(user_id, desired_bot_id)
+        bot = await get_bot(user_id, desired_bot_id, auth_token)
     elif isinstance(conversation_id, int):
         log.debug("Using conversation bot for conversation_id: %s", conversation_id)
-        bot = await get_conversation_bot(user_id, conversation_id)
+        bot = await get_conversation_bot(user_id, conversation_id, auth_token)
         if bot is None:
             log.debug("No conversation bot found, falling back to default bot")
-            bot = await get_default_bot(user_id)
+            bot = await get_default_bot(user_id, auth_token)
     else:
         log.debug("Using default bot")
-        bot = await get_default_bot(user_id)
+        bot = await get_default_bot(user_id, auth_token)
     
     log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
@@ -223,10 +223,10 @@ async def stream(request: Request):
                     })}
                     break
 
-                token = chunk.get("content")
-                if token:
-                    buffer.append(token)
-                    yield {"event": "token", "data": token}
+                content_chunk = chunk.get("content")
+                if content_chunk:
+                    buffer.append(content_chunk)
+                    yield {"event": "token", "data": content_chunk}
 
                 if time.time() - last_ping > ping_interval:
                     yield {"event": "ping", "data": ""}
@@ -250,7 +250,7 @@ async def stream(request: Request):
                         "stream_id": stream_id
                     }
                     log.debug("Updating alternative message - alternative_id: %s", alternative_id)
-                    await update_message_alternative(alternative_id, updates)
+                    await update_message_alternative(alternative_id, updates, auth_token)
                     done_payload.update({"alternative_id": alternative_id})
                     log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
                 else:
@@ -268,7 +268,7 @@ async def stream(request: Request):
                     if aborted:
                         log.info("Stream aborted - stream_id: %s", stream_id)
                     log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
-                    persisted = await safe_post(msg_record)
+                    persisted = await safe_post(msg_record, auth_token)
                     # Supabase REST returns a list when Prefer return=representation
                     if isinstance(persisted, list) and persisted:
                         persisted_id = persisted[0].get("id")
@@ -310,7 +310,7 @@ async def reroll_message(request: Request):
         log.error("Reroll endpoint - Failed to parse JSON payload: %s", e)
         raise HTTPException(400, "Invalid JSON")
 
-    user_id = await verify_jwt(request)
+    user_id, auth_token = await verify_jwt(request)
     
     parent_message_id = payload.get("parent_message_id")
     conversation_id = payload.get("conversation_id")
@@ -340,9 +340,7 @@ async def reroll_message(request: Request):
             stream_id = parent_message_id
             log.debug("Reroll endpoint - Looking up message by stream_id: %s", stream_id)
             try:
-                # Import the function to get message by stream_id
-                from supabase import get_message_by_stream_id
-                parent_message = await get_message_by_stream_id(stream_id, user_id)
+                parent_message = await get_message_by_stream_id(stream_id, user_id, auth_token)
                 actual_parent_message_id = parent_message['id']
                 log.debug("Reroll endpoint - Found actual message ID: %s for stream_id: %s", actual_parent_message_id, stream_id)
             except HTTPException as e:
@@ -355,7 +353,7 @@ async def reroll_message(request: Request):
         # Normal message ID lookup
         try:
             log.debug("Reroll endpoint - Calling get_message with parent_message_id: %s, user_id: %s", parent_message_id, user_id)
-            parent_message = await get_message(parent_message_id, user_id)
+            parent_message = await get_message(parent_message_id, user_id, auth_token)
             log.debug("Reroll endpoint - get_message result: %s", parent_message)
         except HTTPException as e:
             log.error("Reroll endpoint - get_message failed with HTTPException: %s, status_code: %s", e.detail, e.status_code)
@@ -386,7 +384,10 @@ async def reroll_message(request: Request):
     
     try:
         # Create the alternative message in Supabase
-        alternative_response = await safe_post_alternative(alternative_record)
+        alternative_response = await safe_post_alternative(alternative_record, auth_token)
+        if not alternative_response:
+            raise HTTPException(500, "Failed to create alternative message after retries")
+        
         alternative_message = alternative_response[0] if isinstance(alternative_response, list) else alternative_response
         
         log.info("Created alternative message - id: %s, parent_message_id: %s", alternative_message['id'], actual_parent_message_id)
@@ -406,6 +407,8 @@ async def reroll_message(request: Request):
             "stream_id": stream_id
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("Failed to create alternative message: %s", e)
         raise HTTPException(500, f"Failed to create alternative message: {str(e)}")

@@ -6,32 +6,35 @@ from settings import settings
 
 log = logging.getLogger("relay")
 
-COMMON_HEADERS = {
-    "apikey": settings.SUPABASE_SERVICE_ROLE_KEY,
-    "Authorization": f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}",
-}
+def _build_headers(token: str):
+    """Build headers for Supabase REST API using user JWT and anon key."""
+    return {
+        "apikey": settings.SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {token}",
+    }
 
-async def _rest_get(path: str, params: dict):
+async def _rest_get(path: str, params: dict, token: str):
     url = f"{settings.SUPABASE_REST_URL}/{path}"
     log.debug("Supabase GET - url: %s, params: %s", url, params)
+    headers = _build_headers(token)
     async with httpx.AsyncClient() as client:
-        r = await client.get(url, headers=COMMON_HEADERS, params=params, timeout=10)
+        r = await client.get(url, headers=headers, params=params, timeout=10)
     log.debug("Supabase GET response - status: %s, body: %s", r.status_code, r.text)
     if r.status_code != 200:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase fetch failed ({path})")
     return r.json()
 
-async def get_bot(user_id: str, bot_id: int):
+async def get_bot(user_id: str, bot_id: int, token: str):
     """Fetch a specific bot by id, owned by user."""
     log.info("Getting bot - user_id: %s, bot_id: %s", user_id, bot_id)
-    data = await _rest_get("bots", {"id": f"eq.{bot_id}", "user_id": f"eq.{user_id}", "limit": 1})
+    data = await _rest_get("bots", {"id": f"eq.{bot_id}", "user_id": f"eq.{user_id}", "limit": 1}, token)
     if not data:
         log.warning("Bot not found or unauthorized - user_id: %s, bot_id: %s", user_id, bot_id)
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Bot not found or unauthorized")
     log.info("Bot found - id: %s, name: %s", data[0].get("id"), data[0].get("name"))
     return data[0]
 
-async def get_default_bot(user_id: str):
+async def get_default_bot(user_id: str, token: str):
     """
     Fetch the user's default bot.
     If multiple defaults exist, prefer the newest by updated_at/created_at.
@@ -44,7 +47,7 @@ async def get_default_bot(user_id: str):
         "limit": 1,
         "order": "updated_at.desc,created_at.desc",
     }
-    data = await _rest_get("bots", params)
+    data = await _rest_get("bots", params, token)
     if data:
         log.info("Default bot found - id: %s, name: %s", data[0].get("id"), data[0].get("name"))
         return data[0]
@@ -56,14 +59,14 @@ async def get_default_bot(user_id: str):
         "limit": 1,
         "order": "updated_at.desc,created_at.desc",
     }
-    data = await _rest_get("bots", params)
+    data = await _rest_get("bots", params, token)
     if not data:
         log.error("No bot configured for user - user_id: %s", user_id)
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No bot configured for this user")
     log.info("Fallback bot found - id: %s, name: %s", data[0].get("id"), data[0].get("name"))
     return data[0]
 
-async def get_conversation_bot(user_id: str, conversation_id: int):
+async def get_conversation_bot(user_id: str, conversation_id: int, token: str):
     """
     Optional: fetch conversation->bot binding if your schema stores it.
     Expects a `bot_id` column on `conversations`. If missing, returns None.
@@ -75,7 +78,7 @@ async def get_conversation_bot(user_id: str, conversation_id: int):
             "user_id": f"eq.{user_id}",
             "select": "id,bot_id",
             "limit": 1,
-        })
+        }, token)
     except HTTPException:
         # Table/column may not exist yet during migration; gracefully ignore.
         log.info("Conversation bot lookup failed (table/column may not exist)")
@@ -91,73 +94,64 @@ async def get_conversation_bot(user_id: str, conversation_id: int):
         return None
     # ensure ownership
     log.info("Conversation bot found - bot_id: %s", bot_id)
-    return await get_bot(user_id, bot_id)
+    return await get_bot(user_id, bot_id, token)
 
-async def post_message(message: dict):
-    """Write a message record to Supabase REST endpoint."""
+async def _rest_post(path: str, data: dict, token: str):
+    """POST data to Supabase REST endpoint."""
     headers = {
-        **COMMON_HEADERS,
+        **_build_headers(token),
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=representation",
     }
-    url = f"{settings.SUPABASE_REST_URL}/messages"
-    log.info("Posting message to Supabase - url: %s, message: %s", url, message)
-
+    url = f"{settings.SUPABASE_REST_URL}/{path}"
+    log.info("Supabase POST - url: %s, data: %s", url, data)
+    
     async with httpx.AsyncClient() as client:
-        resp = await client.post(url, headers=headers, json=message)
+        resp = await client.post(url, headers=headers, json=data)
+    
     log.debug("Supabase POST response - status: %s, body: %s", resp.status_code, resp.text)
     if resp.status_code not in (200, 201):
         log.error("Supabase insert failed - status: %s, error: %s", resp.status_code, resp.text)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase insert failed: {resp.text}")
-    log.info("Message posted successfully")
+    
+    log.info("Supabase POST successful")
     return resp.json()
 
-
-async def post_message_alternative(alternative: dict):
-    """Write a message alternative record to Supabase REST endpoint."""
+async def _rest_patch(path: str, data: dict, token: str):
+    """PATCH data to Supabase REST endpoint."""
     headers = {
-        **COMMON_HEADERS,
+        **_build_headers(token),
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,return=representation",
     }
-    url = f"{settings.SUPABASE_REST_URL}/message_alternatives"
-    log.info("Posting message alternative to Supabase - url: %s, alternative: %s", url, alternative)
-
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(url, headers=headers, json=alternative)
-    log.debug("Supabase POST alternative response - status: %s, body: %s", resp.status_code, resp.text)
-    if resp.status_code not in (200, 201):
-        log.error("Supabase alternative insert failed - status: %s, error: %s", resp.status_code, resp.text)
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase insert failed: {resp.text}")
-    log.info("Message alternative posted successfully")
-    return resp.json()
-
-
-async def update_message_alternative(alternative_id: int, updates: dict):
-    """Update an existing message alternative record."""
-    headers = {
-        **COMMON_HEADERS,
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=representation",
-    }
-    url = f"{settings.SUPABASE_REST_URL}/message_alternatives?id=eq.{alternative_id}"
-    log.info("Updating message alternative - url: %s, alternative_id: %s, updates: %s", url, alternative_id, updates)
+    url = f"{settings.SUPABASE_REST_URL}/{path}"
+    log.info("Supabase PATCH - url: %s, data: %s", url, data)
     
     async with httpx.AsyncClient() as client:
-        resp = await client.patch(
-            url,
-            headers=headers,
-            json=updates
-        )
+        resp = await client.patch(url, headers=headers, json=data)
+    
     log.debug("Supabase PATCH response - status: %s, body: %s", resp.status_code, resp.text)
     if resp.status_code != 200:
         log.error("Supabase update failed - status: %s, error: %s", resp.status_code, resp.text)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase update failed: {resp.text}")
-    log.info("Message alternative updated successfully")
+    
+    log.info("Supabase PATCH successful")
     return resp.json()
 
+async def post_message(message: dict, token: str):
+    """Write a message record to Supabase REST endpoint."""
+    return await _rest_post("messages", message, token)
 
-async def get_message_alternatives(parent_message_id: int, user_id: str):
+
+async def post_message_alternative(alternative: dict, token: str):
+    """Write a message alternative record to Supabase REST endpoint."""
+    return await _rest_post("message_alternatives", alternative, token)
+
+async def update_message_alternative(alternative_id: int, updates: dict, token: str):
+    """Update an existing message alternative record."""
+    return await _rest_patch(f"message_alternatives?id=eq.{alternative_id}", updates, token)
+
+async def get_message_alternatives(parent_message_id: int, user_id: str, token: str):
     """Get all alternatives for a parent message."""
     log.info("Getting message alternatives - parent_message_id: %s, user_id: %s", parent_message_id, user_id)
     params = {
@@ -166,12 +160,11 @@ async def get_message_alternatives(parent_message_id: int, user_id: str):
         "order": "t.asc"
     }
     
-    data = await _rest_get("message_alternatives", params)
+    data = await _rest_get("message_alternatives", params, token)
     log.info("Found %d message alternatives", len(data))
     return data
 
-
-async def get_message_by_stream_id(stream_id: str, user_id: str):
+async def get_message_by_stream_id(stream_id: str, user_id: str, token: str):
     """Get a specific message by stream_id, verifying user ownership."""
     log.info("get_message_by_stream_id - Starting lookup - stream_id: %s, user_id: %s", stream_id, user_id)
     
@@ -185,7 +178,7 @@ async def get_message_by_stream_id(stream_id: str, user_id: str):
               stream_id, user_id, params)
     
     try:
-        data = await _rest_get("messages", params)
+        data = await _rest_get("messages", params, token)
         
         if not data:
             log.warning("get_message_by_stream_id - No message found - stream_id: %s, user_id: %s", stream_id, user_id)
@@ -207,8 +200,7 @@ async def get_message_by_stream_id(stream_id: str, user_id: str):
         log.debug("get_message_by_stream_id - Full exception details: %s", e)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")
 
-
-async def get_message(message_id: int, user_id: str):
+async def get_message(message_id: int, user_id: str, token: str):
     """Get a specific message by ID, verifying user ownership."""
     log.info("get_message - Starting lookup - message_id: %s, user_id: %s", message_id, user_id)
     
@@ -222,7 +214,7 @@ async def get_message(message_id: int, user_id: str):
               message_id, user_id, params)
     
     try:
-        data = await _rest_get("messages", params)
+        data = await _rest_get("messages", params, token)
         
         if not data:
             log.warning("get_message - No message found - message_id: %s, user_id: %s", message_id, user_id)

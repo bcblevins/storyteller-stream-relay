@@ -1,5 +1,4 @@
 # auth.py
-import httpx, time, json
 import logging
 import traceback
 from jose import jwt, JWTError
@@ -17,7 +16,8 @@ _jwks_cache_time = 0
 # Optional: expected audience (Supabase typically uses 'authenticated')
 EXPECTED_AUD = "authenticated"
 
-async def verify_jwt(request: Request) -> str:
+async def verify_jwt(request: Request) -> tuple[str, str]:
+    """Verify JWT and return (user_id, token)."""
     auth = request.headers.get("authorization") or request.headers.get("Authorization")
     
     # Debug logging for authorization header (without exposing token)
@@ -69,4 +69,4 @@ async def verify_jwt(request: Request) -> str:
     if not sub:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "JWT missing sub")
 
-    return sub  # user_id
+    return sub, token  # user_id, token
