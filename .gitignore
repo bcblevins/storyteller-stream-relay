@@ -5,3 +5,5 @@ __pycache__/
 relay-env/
 
 .env
+
+directory_report.py
