@@ -207,7 +207,8 @@ async def stream(request: Request):
     model = bot.get("model", "deepseek-chat")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         model = settings.OPENROUTER_DEMO_MODEL
-    temperature = bot.get("temperature", 0.7)
+    # Prefer determinism/safety over creativity when temperature is absent.
+    temperature = bot.get("temperature", 0.1)
     max_tokens = bot.get("max_tokens", 1000)
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
     

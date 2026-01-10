@@ -79,13 +79,51 @@ CREATE TABLE public.or_keys (
   CONSTRAINT or_keys_pkey PRIMARY KEY (id)
 );
 
--- CREATE OR REPLACE FUNCTION public.create_demo_openrouter_bot(
---   p_user_id uuid,
---   p_or_key text,
---   p_model text,
---   p_access_path text,
---   p_name text
--- )
--- ... RPC logic goes here ...
--- RETURN QUERY SELECT v_bot_id;
+CREATE OR REPLACE FUNCTION public.create_demo_openrouter_bot(
+  p_user_id uuid,
+  p_or_key text,
+  p_model text,
+  p_access_path text,
+  p_name text
+)
+RETURNS TABLE (bot_id integer)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_is_default boolean;
+  v_bot_id integer;
+BEGIN
+  SELECT NOT EXISTS(
+    SELECT 1 FROM public.bots WHERE user_id = p_user_id AND is_default = true
+  ) INTO v_is_default;
 
+  INSERT INTO public.or_keys (user_id, or_key)
+  VALUES (p_user_id, p_or_key);
+
+  INSERT INTO public.bots (
+    model,
+    access_key,
+    access_path,
+    name,
+    temperature,
+    is_default,
+    user_id,
+    is_openrouter,
+    openrouter_key
+  )
+  VALUES (
+    p_model,
+    NULL,
+    p_access_path,
+    p_name,
+    0.3,
+    v_is_default,
+    p_user_id,
+    true,
+    p_or_key
+  )
+  RETURNING id INTO v_bot_id;
+
+  RETURN QUERY SELECT v_bot_id;
+END;
+$$;
