@@ -61,7 +61,6 @@ class OpenAIService:
             self.initialized = True
             logger.info(
                 "OpenAI client initialized with config:\n"
-                f"api_key: {api_key}"
                 f"base_url: {base_url}"
             )
         except Exception as e:

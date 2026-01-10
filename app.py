@@ -4,10 +4,23 @@ from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 import json, time, logging, asyncio, os
+import httpx
 
 from openai_service import openai_service
 from auth import verify_jwt
-from supabase import get_bot, get_default_bot, get_conversation_bot, post_message, post_message_alternative, get_message, update_message_alternative, get_message_by_stream_id
+from settings import settings
+from supabase import (
+    get_bot,
+    get_default_bot,
+    get_conversation_bot,
+    post_message,
+    post_message_alternative,
+    get_message,
+    update_message_alternative,
+    get_message_by_stream_id,
+    get_openrouter_demo_bot,
+    create_demo_openrouter_bot,
+)
 
 app = FastAPI(title="Storytellr Relay", version="0.1")
 
@@ -70,6 +83,8 @@ app.add_middleware(
 )
 
 user_buckets: dict[str, dict] = {}
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 async def safe_post(msg, token: str):
@@ -175,9 +190,13 @@ async def stream(request: Request):
     log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
     # ---- Initialize provider client from bot config ----
+    api_key = bot.get("access_key")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        api_key = bot.get("openrouter_key")
+
     try:
         await openai_service.initialize_with_config(
-            api_key=bot["access_key"],
+            api_key=api_key,
             base_url=bot.get("access_path")
         )
     except Exception as e:
@@ -186,6 +205,8 @@ async def stream(request: Request):
     log.debug("Messages to send to OpenAI: %s", messages)
 
     model = bot.get("model", "deepseek-chat")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        model = settings.OPENROUTER_DEMO_MODEL
     temperature = bot.get("temperature", 0.7)
     max_tokens = bot.get("max_tokens", 1000)
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
@@ -296,6 +317,62 @@ async def stream(request: Request):
             yield {"event": "done", "data": json.dumps(done_payload)}
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
+
+async def _provision_openrouter_key(user_id: str) -> str:
+    payload = {
+        "name": f"storytellr-demo-{user_id}",
+        "limit": settings.OPENROUTER_DEMO_LIMIT,
+        "limit_reset": settings.OPENROUTER_DEMO_LIMIT_RESET,
+    }
+    headers = {
+        "Authorization": f"Bearer {settings.OPENROUTER_PROVISIONING_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{OPENROUTER_BASE_URL}/keys",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        )
+
+    if resp.status_code not in (200, 201):
+        log.error("OpenRouter provisioning failed - status: %s, body: %s", resp.status_code, resp.text)
+        raise HTTPException(502, "OpenRouter provisioning failed")
+
+    data = resp.json()
+    or_key = (data.get("data") or {}).get("hash") or data.get("hash")
+    if not or_key:
+        log.error("OpenRouter provisioning response missing key hash")
+        raise HTTPException(502, "OpenRouter provisioning returned no key")
+
+    return or_key
+
+@app.post("/v1/openrouter/demo")
+async def provision_openrouter_demo(request: Request):
+    user_id, auth_token = await verify_jwt(request)
+
+    existing = await get_openrouter_demo_bot(user_id, auth_token)
+    if existing:
+        raise HTTPException(409, "Demo bot already exists")
+
+    or_key = await _provision_openrouter_key(user_id)
+
+    bot_id = await create_demo_openrouter_bot(
+        user_id=user_id,
+        or_key=or_key,
+        model=settings.OPENROUTER_DEMO_MODEL,
+        access_path=OPENROUTER_BASE_URL,
+        name="Storytellr Demo",
+        token=auth_token,
+    )
+
+    if not bot_id:
+        log.error("OpenRouter provisioning succeeded but bot creation failed")
+        raise HTTPException(502, "Failed to create demo bot")
+
+    return {"success": True, "bot_id": bot_id}
 
 
 @app.post("/v1/reroll")

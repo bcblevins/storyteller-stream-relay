@@ -6,6 +6,18 @@ from settings import settings
 
 log = logging.getLogger("relay")
 
+_SENSITIVE_FIELDS = {"access_key", "openrouter_key", "or_key"}
+
+def _sanitize_for_log(data):
+    if isinstance(data, dict):
+        return {
+            key: ("***" if key in _SENSITIVE_FIELDS else value)
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [_sanitize_for_log(item) for item in data]
+    return data
+
 def _build_headers(token: str):
     """Build headers for Supabase REST API using user JWT and anon key."""
     return {
@@ -104,7 +116,7 @@ async def _rest_post(path: str, data: dict, token: str):
         "Prefer": "resolution=merge-duplicates,return=representation",
     }
     url = f"{settings.SUPABASE_REST_URL}/{path}"
-    log.info("Supabase POST - url: %s, data: %s", url, data)
+    log.info("Supabase POST - url: %s, data: %s", url, _sanitize_for_log(data))
     
     async with httpx.AsyncClient() as client:
         resp = await client.post(url, headers=headers, json=data)
@@ -125,7 +137,7 @@ async def _rest_patch(path: str, data: dict, token: str):
         "Prefer": "resolution=merge-duplicates,return=representation",
     }
     url = f"{settings.SUPABASE_REST_URL}/{path}"
-    log.info("Supabase PATCH - url: %s, data: %s", url, data)
+    log.info("Supabase PATCH - url: %s, data: %s", url, _sanitize_for_log(data))
     
     async with httpx.AsyncClient() as client:
         resp = await client.patch(url, headers=headers, json=data)
@@ -136,6 +148,26 @@ async def _rest_patch(path: str, data: dict, token: str):
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase update failed: {resp.text}")
     
     log.info("Supabase PATCH successful")
+    return resp.json()
+
+async def _rest_rpc(function_name: str, data: dict, token: str):
+    """POST data to Supabase RPC endpoint."""
+    headers = {
+        **_build_headers(token),
+        "Content-Type": "application/json",
+    }
+    url = f"{settings.SUPABASE_REST_URL}/rpc/{function_name}"
+    log.info("Supabase RPC - url: %s, data: %s", url, _sanitize_for_log(data))
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, headers=headers, json=data)
+
+    log.debug("Supabase RPC response - status: %s, body: %s", resp.status_code, resp.text)
+    if resp.status_code != 200:
+        log.error("Supabase RPC failed - status: %s, error: %s", resp.status_code, resp.text)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase RPC failed: {resp.text}")
+
+    log.info("Supabase RPC successful")
     return resp.json()
 
 async def post_message(message: dict, token: str):
@@ -163,6 +195,41 @@ async def get_message_alternatives(parent_message_id: int, user_id: str, token: 
     data = await _rest_get("message_alternatives", params, token)
     log.info("Found %d message alternatives", len(data))
     return data
+
+async def get_openrouter_demo_bot(user_id: str, token: str):
+    """Get existing OpenRouter demo bot for a user, if any."""
+    log.info("Getting OpenRouter demo bot - user_id: %s", user_id)
+    params = {
+        "user_id": f"eq.{user_id}",
+        "is_openrouter": "eq.true",
+        "openrouter_key": "is.not.null",
+        "limit": 1,
+    }
+    data = await _rest_get("bots", params, token)
+    return data[0] if data else None
+
+async def create_demo_openrouter_bot(
+    user_id: str,
+    or_key: str,
+    model: str,
+    access_path: str,
+    name: str,
+    token: str
+):
+    """Create OpenRouter demo key + bot via RPC (atomic)."""
+    payload = {
+        "p_user_id": user_id,
+        "p_or_key": or_key,
+        "p_model": model,
+        "p_access_path": access_path,
+        "p_name": name,
+    }
+    result = await _rest_rpc("create_demo_openrouter_bot", payload, token)
+    if isinstance(result, list) and result:
+        return result[0].get("bot_id")
+    if isinstance(result, dict):
+        return result.get("bot_id")
+    return None
 
 async def get_message_by_stream_id(stream_id: str, user_id: str, token: str):
     """Get a specific message by stream_id, verifying user ownership."""
