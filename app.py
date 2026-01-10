@@ -51,7 +51,6 @@ allowed_origin_set = {_normalize_origin(o) for o in allowed_origins if _normaliz
 
 log = logging.getLogger("relay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-uvicorn_log = logging.getLogger("uvicorn.error")
 
 
 def apply_cors_headers(response: Response, request: Request) -> Response:
@@ -344,22 +343,18 @@ async def _provision_openrouter_key(user_id: str) -> str:
         )
 
     if resp.status_code not in (200, 201):
-        # Use uvicorn's error logger so this reliably shows up in Fly logs even if
-        # other loggers are suppressed by the server logging config.
-        uvicorn_log.error(
-            "OpenRouter provisioning failed - status: %s, body: %s",
-            resp.status_code,
-            resp.text,
-        )
+        log.error("OpenRouter provisioning failed - status: %s, body: %s", resp.status_code, resp.text)
         raise HTTPException(502, "OpenRouter provisioning failed")
 
     data = resp.json()
-    or_key = (data.get("data") or {}).get("hash") or data.get("hash")
+    # OpenRouter returns the usable API key in the top-level "key" field (shown once).
+    # "data.hash" is an identifier and is not usable for Authorization.
+    or_key = data.get("key")
     if not or_key:
-        uvicorn_log.error("OpenRouter provisioning response missing key hash")
+        log.error("OpenRouter provisioning response missing key")
         raise HTTPException(502, "OpenRouter provisioning returned no key")
 
-    return or_key
+    return or_key.strip()
 
 @app.post("/v1/openrouter/demo")
 async def provision_openrouter_demo(request: Request):
@@ -381,7 +376,7 @@ async def provision_openrouter_demo(request: Request):
     )
 
     if not bot_id:
-        uvicorn_log.error("OpenRouter provisioning succeeded but bot creation failed")
+        log.error("OpenRouter provisioning succeeded but bot creation failed")
         raise HTTPException(502, "Failed to create demo bot")
 
     return {"success": True, "bot_id": bot_id}
