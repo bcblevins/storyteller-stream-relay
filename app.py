@@ -22,7 +22,7 @@ from supabase import (
     create_demo_openrouter_bot,
 )
 
-app = FastAPI(title="Storytellr Relay", version="0.1")
+app = FastAPI(title="Storyteller Relay", version="0.1")
 
 # --- CORS configuration (mirrors legacy Flask server defaults) ---
 default_cors_origins = [
@@ -376,7 +376,7 @@ async def provision_openrouter_demo(request: Request):
         or_key=or_key,
         model=settings.OPENROUTER_DEMO_MODEL,
         access_path=OPENROUTER_BASE_URL,
-        name="Storytellr Demo",
+        name="Storyteller Demo",
         token=auth_token,
     )
 

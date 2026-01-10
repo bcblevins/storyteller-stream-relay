@@ -1,6 +1,6 @@
-# Storytellr Relay
+# Storyteller Relay
 
-The **Storytellr Relay** is a specialized backend service designed to handle real-time AI streaming, authentication, and state persistence for the Storytellr application.
+The **Storyteller Relay** is a specialized backend service designed to handle real-time AI streaming, authentication, and state persistence for the Storyteller application.
 
 It serves as the secure "switchboard" between the client frontend, the database (Supabase), and Large Language Model providers (OpenAI/DeepSeek), ensuring that sensitive API keys remain server-side while delivering low-latency token streaming to users.
 
@@ -37,7 +37,7 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
 * **Server-Sent Events (SSE):** Uses `sse_starlette` for efficient, real-time text streaming.
 * **Smart Persistence:** Features retry logic ("safe post") to ensure messages are saved to the database even if the network hiccups.
 * **Rate Limiting:** Includes basic in-memory rate limiting to prevent abuse.
-* **CORS Management:** specialized handling to support secure cross-origin requests from the Storytellr frontend.
+* **CORS Management:** specialized handling to support secure cross-origin requests from the Storyteller frontend.
 
 ## 🛠️ Tech Stack
 
