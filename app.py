@@ -322,8 +322,13 @@ async def _provision_openrouter_key(user_id: str) -> str:
     payload = {
         "name": f"storytellr-demo-{user_id}",
         "limit": settings.OPENROUTER_DEMO_LIMIT,
-        "limit_reset": settings.OPENROUTER_DEMO_LIMIT_RESET,
     }
+    if settings.OPENROUTER_DEMO_LIMIT_RESET in {"daily", "weekly", "monthly"}:
+        payload["limit_reset"] = settings.OPENROUTER_DEMO_LIMIT_RESET
+    elif settings.OPENROUTER_DEMO_LIMIT_RESET:
+        log.warning(
+            "Invalid OPENROUTER_DEMO_LIMIT_RESET value; omitting from payload"
+        )
     headers = {
         "Authorization": f"Bearer {settings.OPENROUTER_PROVISIONING_KEY}",
         "Content-Type": "application/json",

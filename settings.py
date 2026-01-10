@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -8,7 +9,7 @@ class Settings(BaseSettings):
     OPENROUTER_PROVISIONING_KEY: str
     OPENROUTER_DEMO_MODEL: str
     OPENROUTER_DEMO_LIMIT: float
-    OPENROUTER_DEMO_LIMIT_RESET: str
+    OPENROUTER_DEMO_LIMIT_RESET: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
