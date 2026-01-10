@@ -202,7 +202,7 @@ async def get_openrouter_demo_bot(user_id: str, token: str):
     params = {
         "user_id": f"eq.{user_id}",
         "is_openrouter": "eq.true",
-        "openrouter_key": "is.not.null",
+        "openrouter_key": "not.is.null",
         "limit": 1,
     }
     data = await _rest_get("bots", params, token)
