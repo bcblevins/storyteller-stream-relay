@@ -207,9 +207,14 @@ async def chat_completions_proxy(request: Request):
 
             async def stream_bytes():
                 try:
-                    async for chunk in upstream_response.aiter_bytes():
-                        if chunk:
-                            yield chunk
+                    try:
+                        async for chunk in upstream_response.aiter_bytes():
+                            if chunk:
+                                yield chunk
+                    except httpx.ReadError:
+                        # Upstream SSE providers may terminate chunked responses abruptly.
+                        # Treat as end-of-stream so we don't crash the ASGI response task.
+                        log.warning("Upstream stream closed early for /v1/chat/completions")
                 finally:
                     await upstream_response.aclose()
 
