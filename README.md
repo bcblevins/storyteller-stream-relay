@@ -46,3 +46,63 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
 * **Database/Auth:** Supabase (REST API & JWT Verification)
 * **LLM Integration:** OpenAI SDK (compatible with DeepSeek and other OpenAI-like endpoints)
 * **Runtime:** Python 3.11+
+
+## GLM Addon: OpenRouter Chat Completions Proxy
+
+This relay now includes an optional addon endpoint for your personal GLM usage:
+
+* `POST /v1/chat/completions`
+
+It is isolated from the main Storyteller streaming flow (`/v1/stream`) and uses its own API-key gate.
+
+### Security and Access
+
+The addon endpoint requires:
+
+* `Authorization: Bearer <GLM_PROXY_API_KEY>`
+
+The same key is then used upstream with OpenRouter. If `GLM_PROXY_API_KEY` is not set, the endpoint returns `503` and remains unavailable.
+
+### Reasoning Injection (Optional)
+
+You can force GLM reasoning fields server-side for matching models:
+
+* `reasoning.enabled = true`
+* `reasoning.effort = <configured effort>`
+
+Incoming `reasoning` is preserved unless override is explicitly enabled.
+
+### Environment Variables
+
+* `GLM_PROXY_API_KEY` (default: unset)
+* `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1`)
+* `FORCE_REASONING_ENABLED` (default: `false`)
+* `FORCE_REASONING_EFFORT` (default: `high`)
+* `FORCE_REASONING_MODEL_PATTERNS` (default: `z-ai/glm-4.6:nitro`) comma-separated glob patterns
+* `FORCE_REASONING_OVERRIDE` (default: `false`)
+
+Example:
+
+```bash
+export GLM_PROXY_API_KEY="sk-or-..."
+export FORCE_REASONING_ENABLED="true"
+export FORCE_REASONING_EFFORT="high"
+export FORCE_REASONING_MODEL_PATTERNS="z-ai/glm-4.6:nitro,z-ai/glm-4.6*"
+export FORCE_REASONING_OVERRIDE="false"
+```
+
+### Usage Example
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $GLM_PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "z-ai/glm-4.6:nitro",
+    "stream": true,
+    "messages": [{"role":"user","content":"Give me a short plan."}]
+  }' \
+  http://localhost:8000/v1/chat/completions
+```
+
+Note: forcing reasoning can increase output tokens, latency, and cost.

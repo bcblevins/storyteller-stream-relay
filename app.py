@@ -1,14 +1,16 @@
 # app.py
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette import EventSourceResponse
 import json, time, logging, asyncio, os
 import httpx
+import hmac
 
 from openai_service import openai_service
 from auth import verify_jwt
 from settings import settings
+from request_transforms import TransformConfig, apply_provider_request_transforms
 from supabase import (
     get_bot,
     get_default_bot,
@@ -84,7 +86,7 @@ app.add_middleware(
 
 user_buckets: dict[str, dict] = {}
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_BASE_URL = settings.OPENROUTER_BASE_URL
 
 
 async def safe_post(msg, token: str):
@@ -112,6 +114,32 @@ async def safe_post_alternative(alternative, token: str):
     return None
 
 
+def verify_proxy_api_key(request: Request) -> str:
+    """Validate Bearer token for addon passthrough endpoints."""
+    configured_key = settings.GLM_PROXY_API_KEY
+    if not configured_key:
+        raise HTTPException(503, "GLM passthrough is not configured")
+
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid Authorization header")
+
+    supplied_key = auth_header.split(" ", 1)[1].strip()
+    if not supplied_key or not hmac.compare_digest(supplied_key, configured_key):
+        raise HTTPException(401, "Unauthorized")
+
+    return configured_key
+
+
+def build_transform_config() -> TransformConfig:
+    return TransformConfig(
+        force_reasoning_enabled=settings.FORCE_REASONING_ENABLED,
+        force_reasoning_effort=settings.FORCE_REASONING_EFFORT,
+        force_reasoning_model_patterns=settings.force_reasoning_model_patterns_list,
+        force_reasoning_override=settings.FORCE_REASONING_OVERRIDE,
+    )
+
+
 def check_rate_limit(user_id: str, limit=5, window=60):
     now = time.time()
     bucket = user_buckets.setdefault(user_id, {"count": 0, "reset": now + window})
@@ -125,6 +153,74 @@ def check_rate_limit(user_id: str, limit=5, window=60):
 @app.get("/healthz")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions_proxy(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "JSON body must be an object")
+
+    upstream_key = verify_proxy_api_key(request)
+    model = str(payload.get("model") or "")
+    transformed_payload = apply_provider_request_transforms(
+        payload=payload,
+        provider="openrouter",
+        model=model,
+        config=build_transform_config(),
+    )
+
+    headers = {
+        "Authorization": f"Bearer {upstream_key}",
+        "Content-Type": "application/json",
+    }
+    upstream_url = f"{OPENROUTER_BASE_URL}/chat/completions"
+
+    is_stream = bool(transformed_payload.get("stream"))
+    timeout = None if is_stream else 60.0
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if not is_stream:
+                upstream_response = await client.post(
+                    upstream_url,
+                    headers=headers,
+                    json=transformed_payload,
+                )
+                return Response(
+                    content=upstream_response.content,
+                    status_code=upstream_response.status_code,
+                    media_type=upstream_response.headers.get("content-type"),
+                )
+
+            upstream_request = client.build_request(
+                "POST",
+                upstream_url,
+                headers=headers,
+                json=transformed_payload,
+            )
+            upstream_response = await client.send(upstream_request, stream=True)
+
+            async def stream_bytes():
+                try:
+                    async for chunk in upstream_response.aiter_bytes():
+                        if chunk:
+                            yield chunk
+                finally:
+                    await upstream_response.aclose()
+
+            return StreamingResponse(
+                stream_bytes(),
+                status_code=upstream_response.status_code,
+                media_type=upstream_response.headers.get("content-type", "text/event-stream"),
+            )
+    except httpx.HTTPError as e:
+        log.error("Chat completions passthrough failed: %s", e)
+        raise HTTPException(502, "Upstream provider request failed")
 
 
 @app.get("/auth/test")
