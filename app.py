@@ -146,6 +146,30 @@ def build_transform_config() -> TransformConfig:
     )
 
 
+def _last_message_tail(payload: dict, tail_len: int = 100) -> str:
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return ""
+
+    last_msg = messages[-1]
+    if not isinstance(last_msg, dict):
+        return ""
+
+    content = last_msg.get("content")
+    if isinstance(content, str):
+        return content[-tail_len:]
+
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_parts.append(part.get("text"))
+        joined = "\n".join(text_parts)
+        return joined[-tail_len:]
+
+    return ""
+
+
 def check_rate_limit(user_id: str, limit=5, window=60):
     now = time.time()
     bucket = user_buckets.setdefault(user_id, {"count": 0, "reset": now + window})
@@ -183,6 +207,12 @@ async def chat_completions_proxy(request: Request):
         provider="openrouter",
         model=model,
         config=transform_config,
+    )
+    last_tail = _last_message_tail(transformed_payload, 100)
+    log.info(
+        "chat/completions transformed last-message tail (len=%d): %s",
+        len(last_tail),
+        last_tail,
     )
 
     headers = {
