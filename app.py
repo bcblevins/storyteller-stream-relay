@@ -184,8 +184,8 @@ async def chat_completions_proxy(request: Request):
     timeout = None if is_stream else 60.0
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if not is_stream:
+        if not is_stream:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 upstream_response = await client.post(
                     upstream_url,
                     headers=headers,
@@ -197,32 +197,34 @@ async def chat_completions_proxy(request: Request):
                     media_type=upstream_response.headers.get("content-type"),
                 )
 
-            upstream_request = client.build_request(
-                "POST",
-                upstream_url,
-                headers=headers,
-                json=transformed_payload,
-            )
-            upstream_response = await client.send(upstream_request, stream=True)
+        client = httpx.AsyncClient(timeout=timeout)
+        upstream_request = client.build_request(
+            "POST",
+            upstream_url,
+            headers=headers,
+            json=transformed_payload,
+        )
+        upstream_response = await client.send(upstream_request, stream=True)
 
-            async def stream_bytes():
+        async def stream_bytes():
+            try:
                 try:
-                    try:
-                        async for chunk in upstream_response.aiter_bytes():
-                            if chunk:
-                                yield chunk
-                    except httpx.ReadError:
-                        # Upstream SSE providers may terminate chunked responses abruptly.
-                        # Treat as end-of-stream so we don't crash the ASGI response task.
-                        log.warning("Upstream stream closed early for /v1/chat/completions")
-                finally:
-                    await upstream_response.aclose()
+                    async for chunk in upstream_response.aiter_bytes():
+                        if chunk:
+                            yield chunk
+                except httpx.ReadError:
+                    # Upstream SSE providers may terminate chunked responses abruptly.
+                    # Treat as end-of-stream so we don't crash the ASGI response task.
+                    log.warning("Upstream stream closed early for /v1/chat/completions")
+            finally:
+                await upstream_response.aclose()
+                await client.aclose()
 
-            return StreamingResponse(
-                stream_bytes(),
-                status_code=upstream_response.status_code,
-                media_type=upstream_response.headers.get("content-type", "text/event-stream"),
-            )
+        return StreamingResponse(
+            stream_bytes(),
+            status_code=upstream_response.status_code,
+            media_type=upstream_response.headers.get("content-type", "text/event-stream"),
+        )
     except httpx.HTTPError as e:
         log.error("Chat completions passthrough failed: %s", e)
         raise HTTPException(502, "Upstream provider request failed")
