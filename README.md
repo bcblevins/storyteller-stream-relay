@@ -80,6 +80,8 @@ Incoming `reasoning` is preserved unless override is explicitly enabled.
 * `FORCE_REASONING_EFFORT` (default: `high`)
 * `FORCE_REASONING_MODEL_PATTERNS` (default: `z-ai/glm-4.6:nitro`) comma-separated glob patterns
 * `FORCE_REASONING_OVERRIDE` (default: `false`)
+* `ENABLE_SYSTEM_INJECTION_TAG` (default: `true`)
+* `SYSTEM_INJECTION_TAG_NAME` (default: `injection`)
 
 Example:
 
@@ -89,7 +91,14 @@ export FORCE_REASONING_ENABLED="true"
 export FORCE_REASONING_EFFORT="high"
 export FORCE_REASONING_MODEL_PATTERNS="z-ai/glm-4.6:nitro,z-ai/glm-4.6*"
 export FORCE_REASONING_OVERRIDE="false"
+export ENABLE_SYSTEM_INJECTION_TAG="true"
+export SYSTEM_INJECTION_TAG_NAME="injection"
 ```
+
+When `ENABLE_SYSTEM_INJECTION_TAG=true`, the proxy scans system messages for
+`<injection>...</injection>` (or your configured tag), removes those blocks from
+system content, and appends the extracted text to the latest message before
+sending to OpenRouter.
 
 ### Usage Example
 

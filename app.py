@@ -10,7 +10,11 @@ import hmac
 from openai_service import openai_service
 from auth import verify_jwt
 from settings import settings
-from request_transforms import TransformConfig, apply_provider_request_transforms
+from request_transforms import (
+    TransformConfig,
+    apply_provider_request_transforms,
+    apply_system_injection_tag_transform,
+)
 from supabase import (
     get_bot,
     get_default_bot,
@@ -137,6 +141,8 @@ def build_transform_config() -> TransformConfig:
         force_reasoning_effort=settings.FORCE_REASONING_EFFORT,
         force_reasoning_model_patterns=settings.force_reasoning_model_patterns_list,
         force_reasoning_override=settings.FORCE_REASONING_OVERRIDE,
+        enable_system_injection_tag=settings.ENABLE_SYSTEM_INJECTION_TAG,
+        system_injection_tag_name=settings.SYSTEM_INJECTION_TAG_NAME,
     )
 
 
@@ -167,11 +173,16 @@ async def chat_completions_proxy(request: Request):
 
     upstream_key = verify_proxy_api_key(request)
     model = str(payload.get("model") or "")
-    transformed_payload = apply_provider_request_transforms(
+    transform_config = build_transform_config()
+    transformed_payload = apply_system_injection_tag_transform(
         payload=payload,
+        config=transform_config,
+    )
+    transformed_payload = apply_provider_request_transforms(
+        payload=transformed_payload,
         provider="openrouter",
         model=model,
-        config=build_transform_config(),
+        config=transform_config,
     )
 
     headers = {

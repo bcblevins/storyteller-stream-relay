@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     FORCE_REASONING_EFFORT: str = "high"
     FORCE_REASONING_MODEL_PATTERNS: str = "z-ai/glm-4.6:nitro"
     FORCE_REASONING_OVERRIDE: bool = False
+    ENABLE_SYSTEM_INJECTION_TAG: bool = True
+    SYSTEM_INJECTION_TAG_NAME: str = "injection"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
