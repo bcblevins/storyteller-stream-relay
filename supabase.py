@@ -175,6 +175,11 @@ async def post_message(message: dict, token: str):
     return await _rest_post("messages", message, token)
 
 
+async def post_creator_message(message: dict, token: str):
+    """Write a creator message record to Supabase REST endpoint."""
+    return await _rest_post("creator_messages", message, token)
+
+
 async def post_message_alternative(alternative: dict, token: str):
     """Write a message alternative record to Supabase REST endpoint."""
     return await _rest_post("message_alternatives", alternative, token)
@@ -301,4 +306,62 @@ async def get_message(message_id: int, user_id: str, token: str):
         log.error("get_message - Unexpected error during message lookup - error: %s, type: %s", 
                   e, type(e).__name__)
         log.debug("get_message - Full exception details: %s", e)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")
+
+
+async def get_creator_session(creator_session_id: int, user_id: str, token: str):
+    """Get a specific creator session by ID, verifying user ownership."""
+    log.info(
+        "get_creator_session - Starting lookup - creator_session_id: %s, user_id: %s",
+        creator_session_id,
+        user_id,
+    )
+
+    params = {
+        "id": f"eq.{creator_session_id}",
+        "user_id": f"eq.{user_id}",
+        "limit": 1,
+    }
+
+    log.debug(
+        "get_creator_session - REST API parameters (SQL equivalent: SELECT * FROM creator_sessions WHERE id = %s AND user_id = %s LIMIT 1): %s",
+        creator_session_id,
+        user_id,
+        params,
+    )
+
+    try:
+        data = await _rest_get("creator_sessions", params, token)
+
+        if not data:
+            log.warning(
+                "get_creator_session - No creator session found - creator_session_id: %s, user_id: %s",
+                creator_session_id,
+                user_id,
+            )
+            log.debug("get_creator_session - Supabase returned empty result set")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Creator session not found or unauthorized")
+
+        log.info(
+            "get_creator_session - Creator session found successfully - id: %s",
+            data[0].get("id"),
+        )
+        log.debug("get_creator_session - Full creator session data: %s", data[0])
+        return data[0]
+
+    except HTTPException as e:
+        log.error(
+            "get_creator_session - HTTPException during creator session lookup - status_code: %s, detail: %s",
+            e.status_code,
+            e.detail,
+        )
+        log.debug("get_creator_session - Full HTTPException: %s", e)
+        raise
+    except Exception as e:
+        log.error(
+            "get_creator_session - Unexpected error during creator session lookup - error: %s, type: %s",
+            e,
+            type(e).__name__,
+        )
+        log.debug("get_creator_session - Full exception details: %s", e)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")

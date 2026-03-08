@@ -19,7 +19,9 @@ from supabase import (
     get_bot,
     get_default_bot,
     get_conversation_bot,
+    get_creator_session,
     post_message,
+    post_creator_message,
     post_message_alternative,
     get_message,
     update_message_alternative,
@@ -105,6 +107,18 @@ async def safe_post(msg, token: str):
     return None
 
 
+async def safe_post_creator_message(msg, token: str):
+    for attempt in range(3):
+        try:
+            return await post_creator_message(msg, token)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            log.warning(f"Retrying creator message write ({attempt+1}/3): {e}")
+            await asyncio.sleep(1)
+    return None
+
+
 async def safe_post_alternative(alternative, token: str):
     """Safe alternative message posting with retry logic"""
     for attempt in range(3):
@@ -178,6 +192,220 @@ def check_rate_limit(user_id: str, limit=5, window=60):
     bucket["count"] += 1
     if bucket["count"] > limit:
         raise HTTPException(429, f"Rate limit exceeded ({limit}/min)")
+
+
+async def resolve_stream_bot(
+    user_id: str,
+    auth_token: str,
+    desired_bot_id,
+    conversation_id=None,
+):
+    if isinstance(desired_bot_id, int):
+        log.debug("Using explicit bot_id: %s", desired_bot_id)
+        return await get_bot(user_id, desired_bot_id, auth_token)
+
+    if isinstance(conversation_id, int):
+        log.debug("Using conversation bot for conversation_id: %s", conversation_id)
+        bot = await get_conversation_bot(user_id, conversation_id, auth_token)
+        if bot is None:
+            log.debug("No conversation bot found, falling back to default bot")
+            return await get_default_bot(user_id, auth_token)
+        return bot
+
+    log.debug("Using default bot")
+    return await get_default_bot(user_id, auth_token)
+
+
+def _extract_persisted_id(persisted):
+    if isinstance(persisted, list) and persisted:
+        return persisted[0].get("id")
+    if isinstance(persisted, dict):
+        return persisted.get("id")
+    return None
+
+
+async def _stream_with_mode(request: Request, payload: dict, mode: str):
+    if mode not in {"conversation", "creator"}:
+        raise HTTPException(500, "Invalid stream mode")
+
+    user_id, auth_token = await verify_jwt(request)
+    desired_bot_id = payload.get("bot_id")
+    conversation_id = payload.get("conversation_id") if mode == "conversation" else None
+    creator_session_id = payload.get("creator_session_id") if mode == "creator" else None
+    messages = payload.get("messages", [])
+
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(400, "messages is required and must be a non-empty array")
+
+    if mode == "creator":
+        if not isinstance(creator_session_id, int):
+            raise HTTPException(400, "creator_session_id is required")
+        creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+        log.info(
+            "Creator stream request - User: %s, creator_session_id: %s, entity_type: %s, messages_count: %d",
+            user_id,
+            creator_session_id,
+            creator_session.get("entity_type"),
+            len(messages),
+        )
+    else:
+        log.info(
+            "Stream request - User: %s, conversation_id: %s, messages_count: %d",
+            user_id,
+            conversation_id,
+            len(messages),
+        )
+
+    log.debug(
+        "Bot resolution - desired_bot_id: %s, conversation_id: %s, creator_session_id: %s, messages_count: %d",
+        desired_bot_id,
+        conversation_id,
+        creator_session_id,
+        len(messages),
+    )
+    bot = await resolve_stream_bot(
+        user_id=user_id,
+        auth_token=auth_token,
+        desired_bot_id=desired_bot_id,
+        conversation_id=conversation_id,
+    )
+    log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
+
+    api_key = bot.get("access_key")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        api_key = bot.get("openrouter_key")
+
+    try:
+        await openai_service.initialize_with_config(
+            api_key=api_key,
+            base_url=bot.get("access_path")
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
+
+    log.debug("Messages to send to OpenAI: %s", messages)
+
+    model = bot.get("model", "deepseek-chat")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        model = settings.OPENROUTER_DEMO_MODEL
+    temperature = bot.get("temperature", 0.1)
+    max_tokens = bot.get("max_tokens", 1000)
+    stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
+    is_alternative = mode == "conversation" and payload.get("is_alternative", False)
+    alternative_id = payload.get("alternative_id") if is_alternative else None
+
+    log.info(
+        "Stream configuration - mode: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s",
+        mode,
+        model,
+        temperature,
+        max_tokens,
+        stream_id,
+        is_alternative,
+        alternative_id,
+    )
+
+    async def event_gen():
+        buffer = []
+        ping_interval = 15
+        last_ping = time.time()
+        aborted = False
+
+        try:
+            async for chunk in openai_service.create_chat_completion_stream(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                bot_config=bot
+            ):
+                if await request.is_disconnected():
+                    aborted = True
+                    log.info("Client disconnected early - stream_id: %s", stream_id)
+                    break
+
+                if chunk.get("error"):
+                    log.error("OpenAI streaming error: %s", chunk["error"])
+                    yield {"event": "error", "data": json.dumps({
+                        "error": chunk["error"],
+                        "stream_id": stream_id
+                    })}
+                    break
+
+                content_chunk = chunk.get("content")
+                if content_chunk:
+                    buffer.append(content_chunk)
+                    yield {"event": "token", "data": content_chunk}
+
+                if time.time() - last_ping > ping_interval:
+                    yield {"event": "ping", "data": ""}
+                    last_ping = time.time()
+        finally:
+            log.info("Stream complete - mode: %s, stream_id: %s, tokens: %d, aborted: %s", mode, stream_id, len(buffer), aborted)
+
+            final_text = "".join(buffer)
+
+            async def persist_and_build_done_payload():
+                done_payload = {"stream_id": stream_id}
+
+                if is_alternative and alternative_id:
+                    updates = {
+                        "content": final_text,
+                        "is_streaming": False,
+                        "is_complete": (not aborted),
+                        "stream_id": stream_id
+                    }
+                    log.debug("Updating alternative message - alternative_id: %s", alternative_id)
+                    await update_message_alternative(alternative_id, updates, auth_token)
+                    done_payload.update({"alternative_id": alternative_id})
+                    log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
+                    return done_payload
+
+                if mode == "creator":
+                    msg_record = {
+                        "user_id": user_id,
+                        "creator_session_id": creator_session_id,
+                        "content": final_text,
+                        "is_user_author": False,
+                        "is_streaming": False,
+                        "is_complete": (not aborted),
+                        "stream_id": stream_id,
+                    }
+                    log.debug("Persisting creator message to Supabase - stream_id: %s", stream_id)
+                    persisted = await safe_post_creator_message(msg_record, auth_token)
+                else:
+                    msg_record = {
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                        "content": final_text,
+                        "is_user_author": False,
+                        "is_streaming": False,
+                        "is_complete": (not aborted),
+                        "stream_id": stream_id,
+                    }
+                    if aborted:
+                        log.info("Stream aborted - stream_id: %s", stream_id)
+                    log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
+                    persisted = await safe_post(msg_record, auth_token)
+
+                persisted_id = _extract_persisted_id(persisted)
+                if persisted_id:
+                    done_payload.update({"message_id": persisted_id})
+                log.info("Message persisted - mode: %s, stream_id: %s, message_id: %s", mode, stream_id, persisted_id)
+                return done_payload
+
+            try:
+                done_payload = await asyncio.shield(persist_and_build_done_payload())
+            except asyncio.CancelledError:
+                log.warning("Persistence shield cancelled - stream_id: %s", stream_id)
+                done_payload = {"stream_id": stream_id, "error": "persist_cancelled"}
+            except Exception as e:
+                log.error("Failed to persist message - mode: %s, stream_id: %s, error: %s", mode, stream_id, e)
+                done_payload = {"stream_id": stream_id, "error": "persist_failed"}
+
+            yield {"event": "done", "data": json.dumps(done_payload)}
+
+    return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
 # --- Health endpoint ---
 @app.get("/healthz")
@@ -305,163 +533,17 @@ async def stream(request: Request):
         payload = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON")
+    return await _stream_with_mode(request, payload, mode="conversation")
 
-    user_id, auth_token = await verify_jwt(request)
-    log.info("Stream request - User: %s, conversation_id: %s, messages_count: %d", 
-             user_id, payload.get("conversation_id"), len(payload.get("messages", [])))
 
-    # ---- Resolve bot: explicit -> conversation -> default ----
-    bot = None
-    desired_bot_id = payload.get("bot_id")
-    conversation_id = payload.get("conversation_id")
-    messages = payload.get("messages", [])
-    log.debug("Bot resolution - desired_bot_id: %s, conversation_id: %s, messages_count: %d", 
-             desired_bot_id, conversation_id, len(messages))
-
-    if isinstance(desired_bot_id, int):
-        log.debug("Using explicit bot_id: %s", desired_bot_id)
-        bot = await get_bot(user_id, desired_bot_id, auth_token)
-    elif isinstance(conversation_id, int):
-        log.debug("Using conversation bot for conversation_id: %s", conversation_id)
-        bot = await get_conversation_bot(user_id, conversation_id, auth_token)
-        if bot is None:
-            log.debug("No conversation bot found, falling back to default bot")
-            bot = await get_default_bot(user_id, auth_token)
-    else:
-        log.debug("Using default bot")
-        bot = await get_default_bot(user_id, auth_token)
-    
-    log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
-
-    # ---- Initialize provider client from bot config ----
-    api_key = bot.get("access_key")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        api_key = bot.get("openrouter_key")
-
+@app.post("/v1/creator/stream")
+async def creator_stream(request: Request):
     try:
-        await openai_service.initialize_with_config(
-            api_key=api_key,
-            base_url=bot.get("access_path")
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
 
-    log.debug("Messages to send to OpenAI: %s", messages)
-
-    model = bot.get("model", "deepseek-chat")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        model = settings.OPENROUTER_DEMO_MODEL
-    # Prefer determinism/safety over creativity when temperature is absent.
-    temperature = bot.get("temperature", 0.1)
-    max_tokens = bot.get("max_tokens", 1000)
-    stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
-    
-    # Check if this is an alternative message stream
-    is_alternative = payload.get("is_alternative", False)
-    alternative_id = payload.get("alternative_id")
-    
-    log.info("Stream configuration - model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s",
-             model, temperature, max_tokens, stream_id, is_alternative, alternative_id)
-
-    async def event_gen():
-        buffer = []
-        ping_interval = 15
-        last_ping = time.time()
-        aborted = False
-
-        try:
-            async for chunk in openai_service.create_chat_completion_stream(
-                messages=messages,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                bot_config=bot
-            ):
-                if await request.is_disconnected():
-                    aborted = True
-                    log.info("Client disconnected early - stream_id: %s", stream_id)
-                    break
-
-                if chunk.get("error"):
-                    log.error("OpenAI streaming error: %s", chunk["error"])
-                    yield {"event": "error", "data": json.dumps({
-                        "error": chunk["error"],
-                        "stream_id": stream_id
-                    })}
-                    break
-
-                content_chunk = chunk.get("content")
-                if content_chunk:
-                    buffer.append(content_chunk)
-                    yield {"event": "token", "data": content_chunk}
-
-                if time.time() - last_ping > ping_interval:
-                    yield {"event": "ping", "data": ""}
-                    last_ping = time.time()
-        finally:
-            log.info("Stream complete - stream_id: %s, tokens: %d, aborted: %s", stream_id, len(buffer), aborted)
-
-            # Persist message before sending final 'done' so the client can reconcile IDs.
-            # Shield the persistence step so it still runs even if the client disconnects
-            # and Starlette cancels the streaming task.
-            final_text = "".join(buffer)
-
-            async def persist_and_build_done_payload():
-                done_payload = {"stream_id": stream_id}
-                if is_alternative and alternative_id:
-                    # Update existing alternative message
-                    updates = {
-                        "content": final_text,
-                        "is_streaming": False,
-                        "is_complete": (not aborted),
-                        "stream_id": stream_id
-                    }
-                    log.debug("Updating alternative message - alternative_id: %s", alternative_id)
-                    await update_message_alternative(alternative_id, updates, auth_token)
-                    done_payload.update({"alternative_id": alternative_id})
-                    log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
-                else:
-                    # Create new regular message
-                    msg_record = {
-                        "user_id": user_id,
-                        "conversation_id": conversation_id,
-                        "content": final_text,
-                        "is_user_author": False,
-                        "is_streaming": False,
-                        "is_complete": (not aborted),
-                        "stream_id": stream_id,
-                    }
-
-                    if aborted:
-                        log.info("Stream aborted - stream_id: %s", stream_id)
-                    log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
-                    persisted = await safe_post(msg_record, auth_token)
-                    # Supabase REST returns a list when Prefer return=representation
-                    if isinstance(persisted, list) and persisted:
-                        persisted_id = persisted[0].get("id")
-                    elif isinstance(persisted, dict):
-                        persisted_id = persisted.get("id")
-                    else:
-                        persisted_id = None
-                    if persisted_id:
-                        done_payload.update({"message_id": persisted_id})
-                    log.info("Message persisted - stream_id: %s, message_id: %s", stream_id, persisted_id)
-
-                return done_payload
-
-            try:
-                done_payload = await asyncio.shield(persist_and_build_done_payload())
-            except asyncio.CancelledError:
-                log.warning("Persistence shield cancelled - stream_id: %s", stream_id)
-                done_payload = {"stream_id": stream_id, "error": "persist_cancelled"}
-            except Exception as e:
-                log.error("Failed to persist message - stream_id: %s, error: %s", stream_id, e)
-                done_payload = {"stream_id": stream_id, "error": "persist_failed"}
-
-            # Always send 'done' so the adapter completes cleanly (include IDs when available)
-            yield {"event": "done", "data": json.dumps(done_payload)}
-
-    return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
+    return await _stream_with_mode(request, payload, mode="creator")
 
 async def _provision_openrouter_key(user_id: str) -> str:
     payload = {
