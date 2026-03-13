@@ -63,22 +63,23 @@ The addon endpoint requires:
 
 The same key is then used upstream with OpenRouter. If `GLM_PROXY_API_KEY` is not set, the endpoint returns `503` and remains unavailable.
 
-### Reasoning Injection (Optional)
+### Reasoning Injection
 
-You can force GLM reasoning fields server-side for matching models:
+The relay enables provider-specific thinking/reasoning defaults server-side and preserves explicit request settings unless override is enabled.
+
+OpenRouter requests get:
 
 * `reasoning.enabled = true`
-* `reasoning.effort = <configured effort>`
 
-Incoming `reasoning` is preserved unless override is explicitly enabled.
+If `FORCE_REASONING_EFFORT` is set, that value is also attached where supported. Other recognized providers use their native conventions (`reasoning_effort` for OpenAI reasoning models, `thinking` bodies for Anthropic-compatible and DeepSeek-compatible endpoints).
 
 ### Environment Variables
 
 * `GLM_PROXY_API_KEY` (default: unset)
 * `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1`)
-* `FORCE_REASONING_ENABLED` (default: `false`)
-* `FORCE_REASONING_EFFORT` (default: `high`)
-* `FORCE_REASONING_MODEL_PATTERNS` (default: `z-ai/glm-4.6:nitro`) comma-separated glob patterns
+* `FORCE_REASONING_ENABLED` (default: `true`)
+* `FORCE_REASONING_EFFORT` (default: unset)
+* `FORCE_REASONING_MODEL_PATTERNS` (default: `*`) comma-separated glob patterns
 * `FORCE_REASONING_OVERRIDE` (default: `false`)
 * `ENABLE_SYSTEM_INJECTION_TAG` (default: `true`)
 * `SYSTEM_INJECTION_TAG_NAME` (default: `injection`)
@@ -88,8 +89,8 @@ Example:
 ```bash
 export GLM_PROXY_API_KEY="sk-or-..."
 export FORCE_REASONING_ENABLED="true"
-export FORCE_REASONING_EFFORT="high"
-export FORCE_REASONING_MODEL_PATTERNS="z-ai/glm-4.6:nitro,z-ai/glm-4.6*"
+export FORCE_REASONING_EFFORT=""
+export FORCE_REASONING_MODEL_PATTERNS="*"
 export FORCE_REASONING_OVERRIDE="false"
 export ENABLE_SYSTEM_INJECTION_TAG="true"
 export SYSTEM_INJECTION_TAG_NAME="injection"

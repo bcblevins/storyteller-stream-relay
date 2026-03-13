@@ -4,6 +4,7 @@ import json
 import logging
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError, AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+from request_transforms import normalize_completion_base_url
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -54,14 +55,15 @@ class OpenAIService:
     async def initialize_with_config(self, api_key: str, base_url: Optional[str] = None):
         """Initialize client with specific configuration"""
         try:
+            normalized_base_url = normalize_completion_base_url(base_url)
             self.client = AsyncOpenAI(
                 api_key=api_key,
-                base_url=base_url if base_url else "https://api.deepseek.com/v1"
+                base_url=normalized_base_url if normalized_base_url else "https://api.deepseek.com/v1"
             )
             self.initialized = True
             logger.info(
                 "OpenAI client initialized with config:\n"
-                f"base_url: {base_url}"
+                f"base_url: {normalized_base_url}"
             )
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client with custom config: {e}")
@@ -247,9 +249,10 @@ class OpenAIService:
             True if valid, False otherwise
         """
         try:
+            normalized_base_url = normalize_completion_base_url(base_url)
             test_client = OpenAI(
                 api_key=api_key,
-                base_url=base_url if base_url else "https://api.deepseek.com/v1"
+                base_url=normalized_base_url if normalized_base_url else "https://api.deepseek.com/v1"
             )
 
             # Make a minimal test request
@@ -264,7 +267,7 @@ class OpenAIService:
             # Create a minimal bot config for error context
             bot_config = {
                 'model': 'deepseek-chat',
-                'access_path': base_url if base_url else "https://api.deepseek.com/v1"
+                'access_path': normalized_base_url if normalized_base_url else "https://api.deepseek.com/v1"
             }
             self._log_error_with_context("validate_api_key", e, bot_config)
             return False

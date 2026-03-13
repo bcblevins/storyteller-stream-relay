@@ -14,9 +14,9 @@ class Settings(BaseSettings):
 
     # Optional GLM passthrough feature flags (safe defaults keep existing app behavior unchanged)
     GLM_PROXY_API_KEY: Optional[str] = None
-    FORCE_REASONING_ENABLED: bool = False
-    FORCE_REASONING_EFFORT: str = "high"
-    FORCE_REASONING_MODEL_PATTERNS: str = "z-ai/glm-4.6:nitro"
+    FORCE_REASONING_ENABLED: bool = True
+    FORCE_REASONING_EFFORT: Optional[str] = None
+    FORCE_REASONING_MODEL_PATTERNS: str = "*"
     FORCE_REASONING_OVERRIDE: bool = False
     ENABLE_SYSTEM_INJECTION_TAG: bool = True
     SYSTEM_INJECTION_TAG_NAME: str = "injection"

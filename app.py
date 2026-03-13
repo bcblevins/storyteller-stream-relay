@@ -14,6 +14,9 @@ from request_transforms import (
     TransformConfig,
     apply_provider_request_transforms,
     apply_system_injection_tag_transform,
+    build_completion_request_kwargs,
+    detect_completion_provider,
+    normalize_completion_base_url,
 )
 from supabase import (
     get_bot,
@@ -274,11 +277,12 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     api_key = bot.get("access_key")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         api_key = bot.get("openrouter_key")
+    base_url = normalize_completion_base_url(bot.get("access_path"))
 
     try:
         await openai_service.initialize_with_config(
             api_key=api_key,
-            base_url=bot.get("access_path")
+            base_url=base_url
         )
     except Exception as e:
         raise HTTPException(500, f"Failed to init OpenAI client: {e}")
@@ -290,19 +294,33 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         model = settings.OPENROUTER_DEMO_MODEL
     temperature = bot.get("temperature", 0.1)
     max_tokens = bot.get("max_tokens", 1000)
+    transform_config = build_transform_config()
+    provider = detect_completion_provider(
+        base_url=base_url,
+        model=model,
+        is_openrouter=bool(bot.get("is_openrouter")),
+    )
+    completion_kwargs = build_completion_request_kwargs(
+        payload=payload,
+        provider=provider,
+        model=model,
+        config=transform_config,
+    )
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
     is_alternative = mode == "conversation" and payload.get("is_alternative", False)
     alternative_id = payload.get("alternative_id") if is_alternative else None
 
     log.info(
-        "Stream configuration - mode: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s",
+        "Stream configuration - mode: %s, provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s, completion_kwargs: %s",
         mode,
+        provider,
         model,
         temperature,
         max_tokens,
         stream_id,
         is_alternative,
         alternative_id,
+        sorted(completion_kwargs.keys()),
     )
 
     async def event_gen():
@@ -317,7 +335,8 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                bot_config=bot
+                bot_config=bot,
+                **completion_kwargs,
             ):
                 if await request.is_disconnected():
                     aborted = True
@@ -447,7 +466,8 @@ async def chat_completions_proxy(request: Request):
         "Authorization": f"Bearer {upstream_key}",
         "Content-Type": "application/json",
     }
-    upstream_url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    upstream_base_url = normalize_completion_base_url(OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
+    upstream_url = f"{upstream_base_url.rstrip('/')}/chat/completions"
 
     is_stream = bool(transformed_payload.get("stream"))
     timeout = None if is_stream else 60.0
