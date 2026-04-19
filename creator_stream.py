@@ -43,6 +43,29 @@ class CreatorContinuationRequest(CreatorStreamRequest):
     tool_result: Any | None = None
     feedback: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_tool_call_payload(cls, data: Any):
+        if not isinstance(data, dict):
+            return data
+
+        if data.get("tool_call") is not None:
+            return data
+
+        tool_call_id = data.get("tool_call_id")
+        tool_name = data.get("tool_name")
+        if not tool_call_id or not tool_name:
+            return data
+
+        normalized = dict(data)
+        normalized["tool_call"] = {
+            "id": tool_call_id,
+            "name": tool_name,
+            "arguments": data.get("arguments") or {},
+            "raw_arguments": data.get("raw_arguments"),
+        }
+        return normalized
+
     @model_validator(mode="after")
     def validate_decision_payload(self):
         if self.decision == "approve" and self.tool_result is None:
@@ -54,11 +77,21 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
 
 
-def _tool_arguments_to_dict(raw_arguments: str | None) -> tuple[dict[str, Any], str]:
+def _tool_arguments_to_dict(raw_arguments: Any) -> tuple[dict[str, Any], str]:
+    if isinstance(raw_arguments, dict):
+        return raw_arguments, _json_dumps(raw_arguments)
+
+    if raw_arguments is None:
+        return {}, "{}"
+
+    if not isinstance(raw_arguments, str):
+        log.warning("Tool call arguments had unexpected type %s", type(raw_arguments).__name__)
+        return {}, _json_dumps(raw_arguments)
+
     text = raw_arguments or "{}"
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
+    except (TypeError, json.JSONDecodeError):
         log.warning("Failed to parse tool call arguments as JSON: %s", text)
         return {}, text
 
@@ -162,10 +195,17 @@ def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reaso
             "data": {
                 "stream_id": stream_id,
                 "status": "awaiting_tool_approval",
+                "mode": "native_tools",
                 "sequence": index,
                 "finish_reason": finish_reason,
                 "usage": usage,
                 "assistant_content": assistant_content,
+                "tool_call": {
+                    "id": tool_call.get("id"),
+                    "name": function.get("name"),
+                    "arguments": arguments,
+                    "raw_arguments": raw_text,
+                },
                 "tool_call_id": tool_call.get("id"),
                 "tool_name": function.get("name"),
                 "arguments": arguments,

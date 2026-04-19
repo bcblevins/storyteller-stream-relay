@@ -740,9 +740,30 @@ async def creator_stream_continue(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "JSON body must be an object")
 
+    tool_call_payload = payload.get("tool_call")
+    has_nested_tool_call = isinstance(tool_call_payload, dict)
+    has_flat_tool_call = bool(payload.get("tool_call_id") and payload.get("tool_name"))
+    log.info(
+        "Creator continuation request - stream_id: %s, decision: %s, has_nested_tool_call: %s, has_flat_tool_call: %s, tool_call_id: %s, tool_name: %s",
+        payload.get("stream_id"),
+        payload.get("decision"),
+        has_nested_tool_call,
+        has_flat_tool_call,
+        tool_call_payload.get("id") if has_nested_tool_call else payload.get("tool_call_id"),
+        tool_call_payload.get("name") if has_nested_tool_call else payload.get("tool_name"),
+    )
+
     try:
         continuation_payload = CreatorContinuationRequest.model_validate(payload)
     except ValidationError as e:
+        log.warning(
+            "Invalid creator continuation request - stream_id: %s, decision: %s, has_nested_tool_call: %s, has_flat_tool_call: %s, validation_errors: %s",
+            payload.get("stream_id"),
+            payload.get("decision"),
+            has_nested_tool_call,
+            has_flat_tool_call,
+            e.errors(),
+        )
         raise HTTPException(400, {"error": "Invalid creator continuation request", "details": e.errors()})
 
     continuation_messages = build_creator_continuation_messages(continuation_payload)

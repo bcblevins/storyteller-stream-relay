@@ -52,7 +52,7 @@ Creator sessions now support a relay-managed native tool loop with real upstream
 ### Native-tool SSE events
 
 * `creator_tool_call`
-  * JSON payload with `stream_id`, `status`, `tool_call_id`, `tool_name`, parsed `arguments`, `raw_arguments`, optional `assistant_content`, `finish_reason`, and optional `usage`.
+  * JSON payload with `stream_id`, `status`, `mode`, a normalized `tool_call` object (`id`, `name`, `arguments`, `raw_arguments`), plus legacy flat fields (`tool_call_id`, `tool_name`, `arguments`, `raw_arguments`) for compatibility, optional `assistant_content`, `finish_reason`, and optional `usage`.
 * `token`
   * Final assistant summary text after the tool loop is complete, or direct assistant text if no tool call is needed.
 * `done`
