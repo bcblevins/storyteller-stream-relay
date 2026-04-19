@@ -2,11 +2,18 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from sse_starlette import EventSourceResponse
 import json, time, logging, asyncio, os
 import httpx
 import hmac
 
+from creator_stream import (
+    CreatorContinuationRequest,
+    CreatorStreamRequest,
+    build_creator_continuation_messages,
+    stream_creator_native_tool_turn,
+)
 from openai_service import openai_service
 from auth import verify_jwt
 from settings import settings
@@ -225,6 +232,139 @@ def _extract_persisted_id(persisted):
     if isinstance(persisted, dict):
         return persisted.get("id")
     return None
+
+
+def _serialize_sse_data(data):
+    if isinstance(data, (dict, list)):
+        return json.dumps(data)
+    return data if data is not None else ""
+
+
+async def _stream_creator_native_tool_mode(
+    request: Request,
+    payload: dict,
+    native_payload: CreatorStreamRequest,
+):
+    user_id, auth_token = await verify_jwt(request)
+    desired_bot_id = payload.get("bot_id")
+    creator_session_id = native_payload.creator_session_id
+    messages = native_payload.messages
+
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(400, "messages is required and must be a non-empty array")
+    if not isinstance(creator_session_id, int):
+        raise HTTPException(400, "creator_session_id is required")
+
+    creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+    log.info(
+        "Creator native tool request - User: %s, creator_session_id: %s, entity_type: %s, messages_count: %d",
+        user_id,
+        creator_session_id,
+        creator_session.get("entity_type"),
+        len(messages),
+    )
+
+    bot = await resolve_stream_bot(
+        user_id=user_id,
+        auth_token=auth_token,
+        desired_bot_id=desired_bot_id,
+        conversation_id=None,
+    )
+    log.debug("Selected native tool bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
+
+    api_key = bot.get("access_key")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        api_key = bot.get("openrouter_key")
+    base_url = normalize_completion_base_url(bot.get("access_path"))
+
+    try:
+        await openai_service.initialize_with_config(
+            api_key=api_key,
+            base_url=base_url
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
+
+    model = bot.get("model", "deepseek-chat")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        model = settings.OPENROUTER_DEMO_MODEL
+    temperature = bot.get("temperature", 0.1)
+    max_tokens = bot.get("max_tokens", 1000)
+    transform_config = build_transform_config()
+    provider = detect_completion_provider(
+        base_url=base_url,
+        model=model,
+        is_openrouter=bool(bot.get("is_openrouter")),
+    )
+    completion_kwargs = build_completion_request_kwargs(
+        payload=payload,
+        provider=provider,
+        model=model,
+        config=transform_config,
+    )
+    stream_id = native_payload.stream_id or f"creator-tool-{int(time.time() * 1000)}"
+    stream_payload = native_payload.model_copy(update={"stream_id": stream_id})
+
+    log.info(
+        "Creator native tool configuration - provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
+        provider,
+        model,
+        temperature,
+        max_tokens,
+        stream_id,
+        sorted(completion_kwargs.keys()),
+    )
+
+    async def event_gen():
+        buffered_content: list[str] = []
+        async for event in stream_creator_native_tool_turn(
+            stream_payload,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            bot=bot,
+            completion_kwargs=completion_kwargs,
+        ):
+            if await request.is_disconnected():
+                log.info(
+                    "Creator client disconnected during native tool turn - creator_session_id: %s, stream_id: %s",
+                    creator_session_id,
+                    stream_id,
+                )
+                break
+
+            if event["event"] == "token" and isinstance(event["data"], str):
+                buffered_content.append(event["data"])
+
+            if event["event"] == "done" and isinstance(event["data"], dict):
+                done_payload = dict(event["data"])
+                if done_payload.get("status") == "completed":
+                    final_text = "".join(buffered_content)
+                    if final_text:
+                        msg_record = {
+                            "user_id": user_id,
+                            "creator_session_id": creator_session_id,
+                            "content": final_text,
+                            "is_user_author": False,
+                            "is_streaming": False,
+                            "is_complete": True,
+                            "stream_id": stream_id,
+                        }
+                        log.debug("Persisting native tool creator message to Supabase - stream_id: %s", stream_id)
+                        persisted = await safe_post_creator_message(msg_record, auth_token)
+                        persisted_id = _extract_persisted_id(persisted)
+                        if persisted_id:
+                            done_payload["message_id"] = persisted_id
+                        log.info(
+                            "Native tool creator message persisted - stream_id: %s, message_id: %s",
+                            stream_id,
+                            persisted_id,
+                        )
+                event = {"event": event["event"], "data": done_payload}
+
+            yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
+
+    return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
 
 async def _stream_with_mode(request: Request, payload: dict, mode: str):
@@ -563,7 +703,39 @@ async def creator_stream(request: Request):
     except Exception:
         raise HTTPException(400, "Invalid JSON")
 
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "JSON body must be an object")
+
+    if payload.get("mode") == "native_tools":
+        try:
+            native_payload = CreatorStreamRequest.model_validate(payload)
+        except ValidationError as e:
+            raise HTTPException(400, {"error": "Invalid creator native tool request", "details": e.errors()})
+        return await _stream_creator_native_tool_mode(request, payload, native_payload)
+
     return await _stream_with_mode(request, payload, mode="creator")
+
+
+@app.post("/v1/creator/stream/continue")
+async def creator_stream_continue(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "JSON body must be an object")
+
+    try:
+        continuation_payload = CreatorContinuationRequest.model_validate(payload)
+    except ValidationError as e:
+        raise HTTPException(400, {"error": "Invalid creator continuation request", "details": e.errors()})
+
+    continuation_messages = build_creator_continuation_messages(continuation_payload)
+    next_payload_dict = continuation_payload.model_dump(exclude_none=True)
+    next_payload_dict["messages"] = continuation_messages
+    next_payload = continuation_payload.model_copy(update={"messages": continuation_messages})
+    return await _stream_creator_native_tool_mode(request, next_payload_dict, next_payload)
 
 async def _provision_openrouter_key(user_id: str) -> str:
     payload = {

@@ -1,0 +1,239 @@
+import json
+import logging
+import time
+from typing import Any, AsyncGenerator, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from openai_service import openai_service
+
+log = logging.getLogger("relay.creator")
+
+
+class CreatorStreamRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    creator_session_id: int | None = None
+    bot_id: int | None = None
+    stream_id: str | None = None
+    mode: Literal["text", "native_tools"] = "text"
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    tool_choice: str | dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_native_tools(self):
+        if self.mode == "native_tools" and not self.tools:
+            raise ValueError("tools are required when mode is native_tools")
+        return self
+
+
+class CreatorToolCallInput(BaseModel):
+    id: str
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    raw_arguments: str | None = None
+
+
+class CreatorContinuationRequest(CreatorStreamRequest):
+    mode: Literal["native_tools"] = "native_tools"
+    decision: Literal["approve", "reject", "retry"]
+    tool_call: CreatorToolCallInput
+    tool_result: Any | None = None
+    feedback: str | None = None
+
+    @model_validator(mode="after")
+    def validate_decision_payload(self):
+        if self.decision == "approve" and self.tool_result is None:
+            raise ValueError("tool_result is required when decision is approve")
+        return self
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
+
+
+def _tool_arguments_to_dict(raw_arguments: str | None) -> tuple[dict[str, Any], str]:
+    text = raw_arguments or "{}"
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        log.warning("Failed to parse tool call arguments as JSON: %s", text)
+        return {}, text
+
+    if isinstance(parsed, dict):
+        return parsed, text
+
+    log.warning("Tool call arguments were not a JSON object: %s", text)
+    return {}, text
+
+
+def _coerce_message_text(content: Any) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+        if text_parts:
+            return "\n".join(text_parts)
+    return None
+
+
+def build_creator_assistant_tool_message(tool_call: CreatorToolCallInput, content: str | None = None) -> dict[str, Any]:
+    raw_arguments = tool_call.raw_arguments or _json_dumps(tool_call.arguments)
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": raw_arguments,
+                },
+            }
+        ],
+    }
+
+
+def build_creator_continuation_messages(request: CreatorContinuationRequest) -> list[dict[str, Any]]:
+    messages = list(request.messages)
+    messages.append(build_creator_assistant_tool_message(request.tool_call))
+
+    if request.decision == "approve":
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": request.tool_call.id,
+                "content": _json_dumps(request.tool_result),
+            }
+        )
+        return messages
+
+    if request.decision == "reject":
+        feedback = (request.feedback or "").strip()
+        suffix = f"\nFeedback: {feedback}" if feedback else ""
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "The proposed tool call was rejected and did not run. "
+                    "Do not assume any tool side effects happened. "
+                    "Respond briefly or propose a revised tool call only if needed."
+                    f"{suffix}"
+                ),
+            }
+        )
+        return messages
+
+    feedback = (request.feedback or "").strip()
+    suffix = f"\nFeedback: {feedback}" if feedback else ""
+    messages.append(
+        {
+            "role": "user",
+            "content": (
+                "The proposed tool call was not executed. "
+                "Please try again with revised arguments if a tool call is still needed."
+                f"{suffix}"
+            ),
+        }
+    )
+    return messages
+
+
+def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reason: str | None, usage: dict[str, Any] | None):
+    tool_calls = message.get("tool_calls") or []
+    assistant_content = _coerce_message_text(message.get("content"))
+    for index, tool_call in enumerate(tool_calls):
+        function = tool_call.get("function") or {}
+        raw_arguments = function.get("arguments")
+        arguments, raw_text = _tool_arguments_to_dict(raw_arguments)
+        yield {
+            "event": "creator_tool_call",
+            "data": {
+                "stream_id": stream_id,
+                "status": "awaiting_tool_approval",
+                "sequence": index,
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "assistant_content": assistant_content,
+                "tool_call_id": tool_call.get("id"),
+                "tool_name": function.get("name"),
+                "arguments": arguments,
+                "raw_arguments": raw_text,
+            },
+        }
+
+
+async def stream_creator_native_tool_turn(
+    request_payload: CreatorStreamRequest,
+    *,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    bot: dict[str, Any],
+    completion_kwargs: dict[str, Any] | None = None,
+) -> AsyncGenerator[dict[str, Any], None]:
+    stream_id = request_payload.stream_id or f"creator-stream-{int(time.time() * 1000)}"
+    completion_kwargs = completion_kwargs or {}
+    result = await openai_service.create_chat_completion_response(
+        messages=request_payload.messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        bot_config=bot,
+        tools=request_payload.tools,
+        tool_choice=request_payload.tool_choice or "auto",
+        parallel_tool_calls=False,
+        **completion_kwargs,
+    )
+
+    if result.get("error"):
+        yield {
+            "event": "error",
+            "data": {
+                "error": result["error"],
+                "stream_id": stream_id,
+                "mode": request_payload.mode,
+            },
+        }
+        return
+
+    message = result.get("message") or {}
+    usage = result.get("usage")
+    finish_reason = result.get("finish_reason")
+    tool_calls = message.get("tool_calls") or []
+
+    if tool_calls:
+        for event in _build_tool_call_event(message, stream_id, finish_reason, usage):
+            yield event
+        yield {
+            "event": "done",
+            "data": {
+                "stream_id": stream_id,
+                "status": "awaiting_tool_approval",
+                "mode": request_payload.mode,
+                "finish_reason": finish_reason,
+                "tool_call_count": len(tool_calls),
+                "usage": usage,
+            },
+        }
+        return
+
+    content = _coerce_message_text(message.get("content"))
+    if content:
+        yield {"event": "token", "data": content}
+
+    yield {
+        "event": "done",
+        "data": {
+            "stream_id": stream_id,
+            "status": "completed",
+            "mode": request_payload.mode,
+            "finish_reason": finish_reason,
+            "usage": usage,
+        },
+    }

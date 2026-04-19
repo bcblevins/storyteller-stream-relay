@@ -1,5 +1,5 @@
 import openai
-from typing import List, Dict, Generator, Optional, Union, AsyncGenerator
+from typing import Any, List, Dict, Generator, Optional, Union, AsyncGenerator
 import json
 import logging
 from openai import OpenAI, APIError, APIConnectionError, RateLimitError, AuthenticationError, AsyncOpenAI
@@ -164,6 +164,57 @@ class OpenAIService:
             yield {"content": None, "error": f"API error: {e}"}
         except Exception as e:
             yield {"content": None, "error": f"Unexpected error: {e}"}
+
+    async def create_chat_completion_response(
+            self,
+            messages: List[ChatCompletionMessageParam],
+            model: str = "deepseek-chat",
+            temperature: float = 0.7,
+            max_tokens: int = 1000,
+            bot_config: Optional[Dict] = None,
+            **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Create a non-streaming async chat completion and normalize the response.
+        """
+        self._ensure_initialized()
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+                **kwargs
+            )
+
+            choice = response.choices[0] if response.choices else None
+            message = choice.message.model_dump(exclude_none=True) if choice and choice.message else None
+            usage = response.usage.model_dump(exclude_none=True) if response.usage else None
+
+            return {
+                "message": message,
+                "finish_reason": choice.finish_reason if choice else None,
+                "usage": usage,
+                "error": None,
+            }
+
+        except RateLimitError as e:
+            self._log_error_with_context("create_chat_completion_response", e, bot_config)
+            return {"message": None, "finish_reason": None, "usage": None, "error": f"Rate limit exceeded: {e}"}
+        except AuthenticationError as e:
+            self._log_error_with_context("create_chat_completion_response", e, bot_config)
+            return {"message": None, "finish_reason": None, "usage": None, "error": f"Authentication failed: {e}"}
+        except APIConnectionError as e:
+            self._log_error_with_context("create_chat_completion_response", e, bot_config)
+            return {"message": None, "finish_reason": None, "usage": None, "error": f"Connection error: {e}"}
+        except APIError as e:
+            self._log_error_with_context("create_chat_completion_response", e, bot_config)
+            return {"message": None, "finish_reason": None, "usage": None, "error": f"API error: {e}"}
+        except Exception as e:
+            self._log_error_with_context("create_chat_completion_response", e, bot_config)
+            return {"message": None, "finish_reason": None, "usage": None, "error": f"Unexpected error: {e}"}
 
     def create_chat_completion(
             self,

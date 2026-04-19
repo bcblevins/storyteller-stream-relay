@@ -39,6 +39,27 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
 * **Rate Limiting:** Includes basic in-memory rate limiting to prevent abuse.
 * **CORS Management:** specialized handling to support secure cross-origin requests from the Storyteller frontend.
 
+## Creator Session Native Tools
+
+Creator sessions now support a relay-managed native tool loop with real upstream `tools` usage.
+
+* `POST /v1/creator/stream`
+  * Default behavior stays the same for plain creator text streaming.
+  * When `mode` is `"native_tools"`, the relay sends the provided `tools` and `tool_choice` upstream and returns structured SSE events instead of parsing plaintext pseudo-tools.
+* `POST /v1/creator/stream/continue`
+  * Continues the same creator native-tool turn after the client approves, rejects, or retries a proposed tool call.
+
+### Native-tool SSE events
+
+* `creator_tool_call`
+  * JSON payload with `stream_id`, `status`, `tool_call_id`, `tool_name`, parsed `arguments`, `raw_arguments`, optional `assistant_content`, `finish_reason`, and optional `usage`.
+* `token`
+  * Final assistant summary text after the tool loop is complete, or direct assistant text if no tool call is needed.
+* `done`
+  * JSON payload with `stream_id`, `status` (`awaiting_tool_approval` or `completed`), `mode`, `finish_reason`, and optional `usage`.
+* `error`
+  * JSON payload with clean upstream/provider failure details. Tool capability gating is not done in the relay for v1.
+
 ## 🛠️ Tech Stack
 
 * **Framework:** Python FastAPI
