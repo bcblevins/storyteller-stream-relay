@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
@@ -7,6 +8,7 @@ from creator_stream import (
     CreatorContinuationRequest,
     CreatorStreamRequest,
     build_creator_continuation_messages,
+    stream_creator_native_tool_turn,
 )
 
 
@@ -34,12 +36,14 @@ class CreatorContinuationBuilderTests(unittest.TestCase):
             tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
             decision="approve",
             tool_call={"id": "call_1", "name": "apply_patch", "arguments": {"title": "New"}},
+            assistant_content="I'll update the draft with the tool result.",
             tool_result={"ok": True, "draft_payload": {"title": "New"}},
         )
 
         messages = build_creator_continuation_messages(request)
 
         self.assertEqual(messages[1]["role"], "assistant")
+        self.assertEqual(messages[1]["content"], "I'll update the draft with the tool result.")
         self.assertEqual(messages[1]["tool_calls"][0]["id"], "call_1")
         self.assertEqual(messages[2]["role"], "tool")
         self.assertEqual(json.loads(messages[2]["content"]), {"ok": True, "draft_payload": {"title": "New"}})
@@ -59,6 +63,55 @@ class CreatorContinuationBuilderTests(unittest.TestCase):
         self.assertEqual(messages[-1]["role"], "user")
         self.assertIn("Please try again with revised arguments", messages[-1]["content"])
         self.assertIn("Please change the summary field instead.", messages[-1]["content"])
+
+
+class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_tool_calls_emit_error(self):
+        request = CreatorStreamRequest(
+            messages=[{"role": "user", "content": "Patch the draft"}],
+            mode="native_tools",
+            stream_id="creator-stream-1",
+            tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+        )
+        result = {
+            "message": {
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": '{"title":"One"}'},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": '{"title":"Two"}'},
+                    },
+                ],
+            },
+            "finish_reason": "tool_calls",
+            "usage": {"total_tokens": 42},
+            "error": None,
+        }
+
+        with patch(
+            "creator_stream.openai_service.create_chat_completion_response",
+            AsyncMock(return_value=result),
+        ):
+            events = [
+                event
+                async for event in stream_creator_native_tool_turn(
+                    request,
+                    model="deepseek-chat",
+                    temperature=0.1,
+                    max_tokens=1000,
+                    bot={},
+                )
+            ]
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "error")
+        self.assertEqual(events[0]["data"]["tool_call_count"], 2)
+        self.assertIn("exactly one tool call", events[0]["data"]["error"])
 
 
 if __name__ == "__main__":

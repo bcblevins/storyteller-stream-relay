@@ -39,6 +39,7 @@ class CreatorContinuationRequest(CreatorStreamRequest):
     mode: Literal["native_tools"] = "native_tools"
     decision: Literal["approve", "reject", "retry"]
     tool_call: CreatorToolCallInput
+    assistant_content: str | None = None
     tool_result: Any | None = None
     feedback: str | None = None
 
@@ -101,7 +102,12 @@ def build_creator_assistant_tool_message(tool_call: CreatorToolCallInput, conten
 
 def build_creator_continuation_messages(request: CreatorContinuationRequest) -> list[dict[str, Any]]:
     messages = list(request.messages)
-    messages.append(build_creator_assistant_tool_message(request.tool_call))
+    messages.append(
+        build_creator_assistant_tool_message(
+            request.tool_call,
+            content=request.assistant_content,
+        )
+    )
 
     if request.decision == "approve":
         messages.append(
@@ -208,6 +214,25 @@ async def stream_creator_native_tool_turn(
     tool_calls = message.get("tool_calls") or []
 
     if tool_calls:
+        if len(tool_calls) > 1:
+            log.warning(
+                "Creator native tool turn produced multiple tool calls; rejecting turn - stream_id: %s, tool_call_count: %d",
+                stream_id,
+                len(tool_calls),
+            )
+            yield {
+                "event": "error",
+                "data": {
+                    "error": (
+                        "Creator native tool turns must contain exactly one tool call. "
+                        "Received multiple tool calls in a single assistant turn."
+                    ),
+                    "stream_id": stream_id,
+                    "mode": request_payload.mode,
+                    "tool_call_count": len(tool_calls),
+                },
+            }
+            return
         for event in _build_tool_call_event(message, stream_id, finish_reason, usage):
             yield event
         yield {

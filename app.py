@@ -340,7 +340,11 @@ async def _stream_creator_native_tool_mode(
                 done_payload = dict(event["data"])
                 if done_payload.get("status") == "completed":
                     final_text = "".join(buffered_content)
-                    if final_text:
+
+                    async def persist_and_build_done_payload():
+                        if not final_text:
+                            return done_payload
+
                         msg_record = {
                             "user_id": user_id,
                             "creator_session_id": creator_session_id,
@@ -360,6 +364,16 @@ async def _stream_creator_native_tool_mode(
                             stream_id,
                             persisted_id,
                         )
+                        return done_payload
+
+                    try:
+                        done_payload = await asyncio.shield(persist_and_build_done_payload())
+                    except asyncio.CancelledError:
+                        log.warning("Native tool persistence shield cancelled - stream_id: %s", stream_id)
+                        done_payload["error"] = "persist_cancelled"
+                    except Exception as e:
+                        log.error("Failed to persist native tool creator message - stream_id: %s, error: %s", stream_id, e)
+                        done_payload["error"] = "persist_failed"
                 event = {"event": event["event"], "data": done_payload}
 
             yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
