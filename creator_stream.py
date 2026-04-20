@@ -37,8 +37,8 @@ class CreatorToolCallInput(BaseModel):
 
 class CreatorContinuationRequest(CreatorStreamRequest):
     mode: Literal["native_tools"] = "native_tools"
-    decision: Literal["approve", "reject", "retry"]
-    tool_call: CreatorToolCallInput
+    decision: Literal["approve", "reject", "retry"] | None = None
+    tool_call: CreatorToolCallInput | None = None
     assistant_content: str | None = None
     tool_result: Any | None = None
     feedback: str | None = None
@@ -65,13 +65,6 @@ class CreatorContinuationRequest(CreatorStreamRequest):
             "raw_arguments": data.get("raw_arguments"),
         }
         return normalized
-
-    @model_validator(mode="after")
-    def validate_decision_payload(self):
-        if self.decision == "approve" and self.tool_result is None:
-            raise ValueError("tool_result is required when decision is approve")
-        return self
-
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
@@ -113,76 +106,6 @@ def _coerce_message_text(content: Any) -> str | None:
         if text_parts:
             return "\n".join(text_parts)
     return None
-
-
-def build_creator_assistant_tool_message(tool_call: CreatorToolCallInput, content: str | None = None) -> dict[str, Any]:
-    raw_arguments = tool_call.raw_arguments or _json_dumps(tool_call.arguments)
-    return {
-        "role": "assistant",
-        "content": content,
-        "tool_calls": [
-            {
-                "id": tool_call.id,
-                "type": "function",
-                "function": {
-                    "name": tool_call.name,
-                    "arguments": raw_arguments,
-                },
-            }
-        ],
-    }
-
-
-def build_creator_continuation_messages(request: CreatorContinuationRequest) -> list[dict[str, Any]]:
-    messages = list(request.messages)
-    messages.append(
-        build_creator_assistant_tool_message(
-            request.tool_call,
-            content=request.assistant_content,
-        )
-    )
-
-    if request.decision == "approve":
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": request.tool_call.id,
-                "content": _json_dumps(request.tool_result),
-            }
-        )
-        return messages
-
-    if request.decision == "reject":
-        feedback = (request.feedback or "").strip()
-        suffix = f"\nFeedback: {feedback}" if feedback else ""
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "The proposed tool call was rejected and did not run. "
-                    "Do not assume any tool side effects happened. "
-                    "Respond briefly or propose a revised tool call only if needed."
-                    f"{suffix}"
-                ),
-            }
-        )
-        return messages
-
-    feedback = (request.feedback or "").strip()
-    suffix = f"\nFeedback: {feedback}" if feedback else ""
-    messages.append(
-        {
-            "role": "user",
-            "content": (
-                "The proposed tool call was not executed. "
-                "Please try again with revised arguments if a tool call is still needed."
-                f"{suffix}"
-            ),
-        }
-    )
-    return messages
-
-
 def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reason: str | None, usage: dict[str, Any] | None):
     tool_calls = message.get("tool_calls") or []
     assistant_content = _coerce_message_text(message.get("content"))

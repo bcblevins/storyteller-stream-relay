@@ -1,13 +1,12 @@
-import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
+import app as relay_app
 from creator_stream import (
     CreatorContinuationRequest,
     CreatorStreamRequest,
-    build_creator_continuation_messages,
     stream_creator_native_tool_turn,
 )
 
@@ -17,15 +16,30 @@ class CreatorStreamRequestTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CreatorStreamRequest(messages=[], mode="native_tools")
 
-    def test_approve_requires_tool_result(self):
-        with self.assertRaises(ValidationError):
-            CreatorContinuationRequest(
-                messages=[{"role": "user", "content": "Patch the draft"}],
-                mode="native_tools",
-                tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
-                decision="approve",
-                tool_call={"id": "call_1", "name": "apply_patch", "arguments": {"title": "New"}},
-            )
+    def test_accepts_structured_message_content_blocks(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll patch the draft."},
+                    {"type": "tool_use", "id": "call_1", "name": "apply_patch", "input": {"title": "New"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "ok"}]},
+                ],
+            },
+        ]
+
+        request = CreatorStreamRequest(
+            messages=messages,
+            mode="native_tools",
+            tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+        )
+
+        self.assertEqual(request.messages, messages)
 
 
 class CreatorContinuationBuilderTests(unittest.TestCase):
@@ -47,40 +61,77 @@ class CreatorContinuationBuilderTests(unittest.TestCase):
         self.assertEqual(request.tool_call.arguments, {"title": "New"})
         self.assertEqual(request.tool_call.raw_arguments, '{"title":"New"}')
 
-    def test_approve_builds_assistant_and_tool_messages(self):
+    def test_continuation_allows_telemetry_without_tool_result(self):
         request = CreatorContinuationRequest(
             messages=[{"role": "user", "content": "Patch the draft"}],
             mode="native_tools",
             tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
             decision="approve",
             tool_call={"id": "call_1", "name": "apply_patch", "arguments": {"title": "New"}},
-            assistant_content="I'll update the draft with the tool result.",
-            tool_result={"ok": True, "draft_payload": {"title": "New"}},
         )
 
-        messages = build_creator_continuation_messages(request)
+        self.assertEqual(request.decision, "approve")
+        self.assertIsNone(request.tool_result)
 
-        self.assertEqual(messages[1]["role"], "assistant")
-        self.assertEqual(messages[1]["content"], "I'll update the draft with the tool result.")
-        self.assertEqual(messages[1]["tool_calls"][0]["id"], "call_1")
-        self.assertEqual(messages[2]["role"], "tool")
-        self.assertEqual(json.loads(messages[2]["content"]), {"ok": True, "draft_payload": {"title": "New"}})
-
-    def test_retry_adds_feedback_as_user_message(self):
+    def test_continuation_allows_missing_legacy_telemetry_fields(self):
         request = CreatorContinuationRequest(
             messages=[{"role": "user", "content": "Patch the draft"}],
             mode="native_tools",
             tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
-            decision="retry",
-            tool_call={"id": "call_1", "name": "apply_patch", "arguments": {"title": "New"}},
-            feedback="Please change the summary field instead.",
         )
 
-        messages = build_creator_continuation_messages(request)
+        self.assertIsNone(request.decision)
+        self.assertIsNone(request.tool_call)
 
-        self.assertEqual(messages[-1]["role"], "user")
-        self.assertIn("Please try again with revised arguments", messages[-1]["content"])
-        self.assertIn("Please change the summary field instead.", messages[-1]["content"])
+
+class _JsonRequest:
+    def __init__(self, payload):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+
+class CreatorContinuationEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_continue_preserves_messages_without_synthesizing_tool_turns(self):
+        messages = [
+            {"role": "user", "content": "Patch the draft"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll use the patch tool."},
+                    {"type": "tool_use", "id": "call_1", "name": "apply_patch", "input": {"title": "New"}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": [{"type": "text", "text": "Applied"}]},
+                ],
+            },
+        ]
+        payload = {
+            "messages": messages,
+            "mode": "native_tools",
+            "creator_session_id": 123,
+            "stream_id": "creator-stream-1",
+            "tools": [{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+            "decision": "approve",
+            "tool_call": {"id": "call_1", "name": "apply_patch", "arguments": {"title": "New"}},
+            "tool_result": {"ok": True},
+            "feedback": "Telemetry only.",
+        }
+
+        with patch("app._stream_creator_native_tool_mode", AsyncMock(return_value={"ok": True})) as stream_mock:
+            result = await relay_app.creator_stream_continue(_JsonRequest(payload))
+
+        self.assertEqual(result, {"ok": True})
+        forwarded_payload, forwarded_model = stream_mock.await_args.args[1:]
+        self.assertEqual(forwarded_payload["messages"], messages)
+        self.assertEqual(forwarded_model.messages, messages)
+        self.assertEqual(len(forwarded_payload["messages"]), 3)
+        self.assertEqual(forwarded_payload["decision"], "approve")
+        self.assertEqual(forwarded_payload["tool_result"], {"ok": True})
 
 
 class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):

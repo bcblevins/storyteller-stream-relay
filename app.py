@@ -11,7 +11,6 @@ import hmac
 from creator_stream import (
     CreatorContinuationRequest,
     CreatorStreamRequest,
-    build_creator_continuation_messages,
     stream_creator_native_tool_turn,
 )
 from openai_service import openai_service
@@ -766,11 +765,8 @@ async def creator_stream_continue(request: Request):
         )
         raise HTTPException(400, {"error": "Invalid creator continuation request", "details": e.errors()})
 
-    continuation_messages = build_creator_continuation_messages(continuation_payload)
     next_payload_dict = continuation_payload.model_dump(exclude_none=True)
-    next_payload_dict["messages"] = continuation_messages
-    next_payload = continuation_payload.model_copy(update={"messages": continuation_messages})
-    return await _stream_creator_native_tool_mode(request, next_payload_dict, next_payload)
+    return await _stream_creator_native_tool_mode(request, next_payload_dict, continuation_payload)
 
 async def _provision_openrouter_key(user_id: str) -> str:
     payload = {

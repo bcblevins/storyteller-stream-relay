@@ -45,9 +45,11 @@ Creator sessions now support a relay-managed native tool loop with real upstream
 
 * `POST /v1/creator/stream`
   * Default behavior stays the same for plain creator text streaming.
-  * When `mode` is `"native_tools"`, the relay sends the provided `tools` and `tool_choice` upstream and returns structured SSE events instead of parsing plaintext pseudo-tools.
+  * When `mode` is `"native_tools"`, the relay accepts `messages` whose `content` is either a plain string or an ordered array of native content blocks such as `text`, `tool_use`, and `tool_result`.
+  * The relay forwards that creator message history upstream as the prompt source of truth, apart from normal provider-format translation, and does not reconstruct tool turns.
 * `POST /v1/creator/stream/continue`
-  * Continues the same creator native-tool turn after the client approves, rejects, or retries a proposed tool call.
+  * Continues the same creator native-tool turn using the provided `messages` history as-is.
+  * Legacy fields like `decision`, `tool_call`, `tool_result`, and `feedback` may still be sent for telemetry, but they no longer modify prompt history.
 
 ### Native-tool SSE events
 
