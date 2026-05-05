@@ -135,32 +135,21 @@ class CreatorContinuationEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tool_call_event_includes_nested_tool_call_shape(self):
+    async def test_text_response_streams_token_chunks(self):
         request = CreatorStreamRequest(
-            messages=[{"role": "user", "content": "Patch the draft"}],
+            messages=[{"role": "user", "content": "Summarize the draft"}],
             mode="native_tools",
             stream_id="creator-stream-1",
             tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
         )
-        result = {
-            "message": {
-                "content": "I'll patch the draft now.",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "apply_patch", "arguments": '{"title":"One"}'},
-                    }
-                ],
-            },
-            "finish_reason": "tool_calls",
-            "usage": {"total_tokens": 42},
-            "error": None,
-        }
+
+        async def fake_stream(*args, **kwargs):
+            yield {"content": "First ", "error": None}
+            yield {"content": "second.", "finish_reason": "stop", "usage": {"total_tokens": 42}, "error": None}
 
         with patch(
-            "creator_stream.openai_service.create_chat_completion_response",
-            AsyncMock(return_value=result),
+            "creator_stream.openai_service.create_chat_completion_tool_stream",
+            fake_stream,
         ):
             events = [
                 event
@@ -173,12 +162,66 @@ class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        self.assertEqual(events[0]["event"], "creator_tool_call")
-        self.assertEqual(events[0]["data"]["mode"], "native_tools")
-        self.assertEqual(events[0]["data"]["tool_call"]["id"], "call_1")
-        self.assertEqual(events[0]["data"]["tool_call"]["name"], "apply_patch")
-        self.assertEqual(events[0]["data"]["tool_call"]["arguments"], {"title": "One"})
-        self.assertEqual(events[0]["data"]["assistant_content"], "I'll patch the draft now.")
+        self.assertEqual([event["event"] for event in events], ["token", "token", "done"])
+        self.assertEqual(events[0]["data"], "First ")
+        self.assertEqual(events[1]["data"], "second.")
+        self.assertEqual(events[2]["data"]["status"], "completed")
+        self.assertEqual(events[2]["data"]["finish_reason"], "stop")
+
+    async def test_tool_call_event_includes_nested_tool_call_shape(self):
+        request = CreatorStreamRequest(
+            messages=[{"role": "user", "content": "Patch the draft"}],
+            mode="native_tools",
+            stream_id="creator-stream-1",
+            tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+        )
+        async def fake_stream(*args, **kwargs):
+            yield {"content": "I'll patch ", "error": None}
+            yield {"content": "the draft now.", "error": None}
+            yield {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": '{"title"'},
+                    }
+                ],
+                "error": None,
+            }
+            yield {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "function": {"arguments": ':"One"}'},
+                    }
+                ],
+                "finish_reason": "tool_calls",
+                "usage": {"total_tokens": 42},
+                "error": None,
+            }
+
+        with patch(
+            "creator_stream.openai_service.create_chat_completion_tool_stream",
+            fake_stream,
+        ):
+            events = [
+                event
+                async for event in stream_creator_native_tool_turn(
+                    request,
+                    model="deepseek-chat",
+                    temperature=0.1,
+                    max_tokens=1000,
+                    bot={},
+                )
+            ]
+
+        self.assertEqual([event["event"] for event in events], ["token", "token", "creator_tool_call", "done"])
+        self.assertEqual(events[2]["data"]["mode"], "native_tools")
+        self.assertEqual(events[2]["data"]["tool_call"]["id"], "call_1")
+        self.assertEqual(events[2]["data"]["tool_call"]["name"], "apply_patch")
+        self.assertEqual(events[2]["data"]["tool_call"]["arguments"], {"title": "One"})
+        self.assertEqual(events[2]["data"]["assistant_content"], "I'll patch the draft now.")
 
     async def test_multiple_tool_calls_emit_error(self):
         request = CreatorStreamRequest(
@@ -187,29 +230,30 @@ class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):
             stream_id="creator-stream-1",
             tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
         )
-        result = {
-            "message": {
+        async def fake_stream(*args, **kwargs):
+            yield {
                 "tool_calls": [
                     {
+                        "index": 0,
                         "id": "call_1",
                         "type": "function",
                         "function": {"name": "apply_patch", "arguments": '{"title":"One"}'},
                     },
                     {
+                        "index": 1,
                         "id": "call_2",
                         "type": "function",
                         "function": {"name": "apply_patch", "arguments": '{"title":"Two"}'},
                     },
                 ],
-            },
-            "finish_reason": "tool_calls",
-            "usage": {"total_tokens": 42},
-            "error": None,
-        }
+                "finish_reason": "tool_calls",
+                "usage": {"total_tokens": 42},
+                "error": None,
+            }
 
         with patch(
-            "creator_stream.openai_service.create_chat_completion_response",
-            AsyncMock(return_value=result),
+            "creator_stream.openai_service.create_chat_completion_tool_stream",
+            fake_stream,
         ):
             events = [
                 event

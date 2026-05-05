@@ -137,6 +137,37 @@ def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reaso
         }
 
 
+def _accumulate_tool_call_delta(final_tool_calls: dict[int, dict[str, Any]], tool_call_delta: dict[str, Any]):
+    index = tool_call_delta.get("index")
+    if not isinstance(index, int):
+        index = len(final_tool_calls)
+
+    current = final_tool_calls.setdefault(
+        index,
+        {
+            "id": None,
+            "type": "function",
+            "function": {"name": None, "arguments": ""},
+        },
+    )
+
+    if tool_call_delta.get("id"):
+        current["id"] = tool_call_delta["id"]
+    if tool_call_delta.get("type"):
+        current["type"] = tool_call_delta["type"]
+
+    incoming_function = tool_call_delta.get("function") or {}
+    current_function = current.setdefault("function", {"name": None, "arguments": ""})
+    if incoming_function.get("name"):
+        current_function["name"] = incoming_function["name"]
+    if incoming_function.get("arguments"):
+        current_function["arguments"] = (current_function.get("arguments") or "") + incoming_function["arguments"]
+
+
+def _final_tool_call_list(final_tool_calls: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    return [final_tool_calls[index] for index in sorted(final_tool_calls)]
+
+
 async def stream_creator_native_tool_turn(
     request_payload: CreatorStreamRequest,
     *,
@@ -148,7 +179,12 @@ async def stream_creator_native_tool_turn(
 ) -> AsyncGenerator[dict[str, Any], None]:
     stream_id = request_payload.stream_id or f"creator-stream-{int(time.time() * 1000)}"
     completion_kwargs = completion_kwargs or {}
-    result = await openai_service.create_chat_completion_response(
+    content_parts: list[str] = []
+    final_tool_calls: dict[int, dict[str, Any]] = {}
+    usage = None
+    finish_reason = None
+
+    async for chunk in openai_service.create_chat_completion_tool_stream(
         messages=request_payload.messages,
         model=model,
         temperature=temperature,
@@ -158,23 +194,34 @@ async def stream_creator_native_tool_turn(
         tool_choice=request_payload.tool_choice or "auto",
         parallel_tool_calls=False,
         **completion_kwargs,
-    )
+    ):
+        if chunk.get("error"):
+            yield {
+                "event": "error",
+                "data": {
+                    "error": chunk["error"],
+                    "stream_id": stream_id,
+                    "mode": request_payload.mode,
+                },
+            }
+            return
 
-    if result.get("error"):
-        yield {
-            "event": "error",
-            "data": {
-                "error": result["error"],
-                "stream_id": stream_id,
-                "mode": request_payload.mode,
-            },
-        }
-        return
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        if chunk.get("finish_reason"):
+            finish_reason = chunk["finish_reason"]
 
-    message = result.get("message") or {}
-    usage = result.get("usage")
-    finish_reason = result.get("finish_reason")
-    tool_calls = message.get("tool_calls") or []
+        content_chunk = chunk.get("content")
+        if content_chunk:
+            content_parts.append(content_chunk)
+            yield {"event": "token", "data": content_chunk}
+
+        for tool_call_delta in chunk.get("tool_calls") or []:
+            _accumulate_tool_call_delta(final_tool_calls, tool_call_delta)
+
+    content = "".join(content_parts)
+    tool_calls = _final_tool_call_list(final_tool_calls)
+    message = {"content": content, "tool_calls": tool_calls}
 
     if tool_calls:
         if len(tool_calls) > 1:
@@ -210,10 +257,6 @@ async def stream_creator_native_tool_turn(
             },
         }
         return
-
-    content = _coerce_message_text(message.get("content"))
-    if content:
-        yield {"event": "token", "data": content}
 
     yield {
         "event": "done",

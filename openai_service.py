@@ -165,6 +165,87 @@ class OpenAIService:
         except Exception as e:
             yield {"content": None, "error": f"Unexpected error: {e}"}
 
+    async def create_chat_completion_tool_stream(
+            self,
+            messages: List[ChatCompletionMessageParam],
+            model: str = "deepseek-chat",
+            temperature: float = 0.7,
+            max_tokens: int = 1000,
+            bot_config: Optional[Dict] = None,
+            tools: Optional[List[Dict[str, Any]]] = None,
+            tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+            parallel_tool_calls: Optional[bool] = None,
+            **kwargs
+    ) -> AsyncGenerator[Dict, None]:
+        """
+        Stream a chat completion that may include tool calls.
+        """
+        self._ensure_initialized()
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                stream=True,
+                **kwargs
+            )
+
+            async for chunk in stream:
+                usage = self._dump_openai_model(getattr(chunk, "usage", None))
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    if usage:
+                        yield {"usage": usage, "error": None}
+                    continue
+
+                choice = choices[0]
+                delta = self._dump_openai_model(getattr(choice, "delta", None)) or {}
+                tool_calls = delta.get("tool_calls") or []
+                content = delta.get("content")
+                finish_reason = getattr(choice, "finish_reason", None)
+
+                payload = {
+                    "content": content,
+                    "tool_calls": tool_calls,
+                    "finish_reason": finish_reason,
+                    "usage": usage,
+                    "error": None,
+                }
+                if content or tool_calls or finish_reason or usage:
+                    yield payload
+
+        except RateLimitError as e:
+            self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
+            yield {"content": None, "tool_calls": None, "error": f"Rate limit exceeded: {e}"}
+        except AuthenticationError as e:
+            self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
+            yield {"content": None, "tool_calls": None, "error": f"Authentication failed: {e}"}
+        except APIConnectionError as e:
+            self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
+            yield {"content": None, "tool_calls": None, "error": f"Connection error: {e}"}
+        except APIError as e:
+            self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
+            yield {"content": None, "tool_calls": None, "error": f"API error: {e}"}
+        except Exception as e:
+            self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
+            yield {"content": None, "tool_calls": None, "error": f"Unexpected error: {e}"}
+
+    def _dump_openai_model(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list):
+            return [self._dump_openai_model(item) for item in value]
+        if hasattr(value, "model_dump"):
+            return value.model_dump(exclude_none=True)
+        return value
+
     async def create_chat_completion_response(
             self,
             messages: List[ChatCompletionMessageParam],
