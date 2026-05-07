@@ -211,6 +211,10 @@ async def stream_creator_native_tool_turn(
         if chunk.get("finish_reason"):
             finish_reason = chunk["finish_reason"]
 
+        reasoning_chunk = chunk.get("reasoning")
+        if reasoning_chunk:
+            yield {"event": "reasoning", "data": reasoning_chunk}
+
         content_chunk = chunk.get("content")
         if content_chunk:
             content_parts.append(content_chunk)

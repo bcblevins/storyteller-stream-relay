@@ -223,6 +223,55 @@ class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[2]["data"]["tool_call"]["arguments"], {"title": "One"})
         self.assertEqual(events[2]["data"]["assistant_content"], "I'll patch the draft now.")
 
+    async def test_reasoning_chunks_stream_separately_from_content_and_tool_calls(self):
+        request = CreatorStreamRequest(
+            messages=[{"role": "user", "content": "Patch the draft"}],
+            mode="native_tools",
+            stream_id="creator-stream-1",
+            tools=[{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+        )
+
+        async def fake_stream(*args, **kwargs):
+            yield {"reasoning": "Considering the edit.", "error": None}
+            yield {"content": "I'll patch it.", "error": None}
+            yield {"reasoning": "Preparing tool call.", "error": None}
+            yield {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": '{"title":"One"}'},
+                    }
+                ],
+                "finish_reason": "tool_calls",
+                "usage": {"total_tokens": 42},
+                "error": None,
+            }
+
+        with patch(
+            "creator_stream.openai_service.create_chat_completion_tool_stream",
+            fake_stream,
+        ):
+            events = [
+                event
+                async for event in stream_creator_native_tool_turn(
+                    request,
+                    model="deepseek-chat",
+                    temperature=0.1,
+                    max_tokens=1000,
+                    bot={},
+                )
+            ]
+
+        self.assertEqual(
+            [event["event"] for event in events],
+            ["reasoning", "token", "reasoning", "creator_tool_call", "done"],
+        )
+        self.assertEqual(events[0]["data"], "Considering the edit.")
+        self.assertEqual(events[2]["data"], "Preparing tool call.")
+        self.assertEqual(events[3]["data"]["assistant_content"], "I'll patch it.")
+
     async def test_multiple_tool_calls_emit_error(self):
         request = CreatorStreamRequest(
             messages=[{"role": "user", "content": "Patch the draft"}],

@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIService:
+    _REASONING_DELTA_KEYS = (
+        "reasoning_content",
+        "reasoning",
+        "reasoning_delta",
+        "thinking_content",
+        "thinking",
+        "thinking_delta",
+    )
+    _TEXT_DELTA_KEYS = ("text", "content", "delta")
+
     def __init__(self):
         self.client: Optional[AsyncOpenAI] = None
         self.initialized = False
@@ -106,6 +116,10 @@ class OpenAIService:
                 async for event in stream:
                     et = getattr(event, "type", None)
                     count+=1
+                    reasoning = self._extract_reasoning_delta(event)
+                    if reasoning:
+                        yield {"reasoning": reasoning, "error": None}
+
                     # --- Modern event API ---
                     if et == "content.delta":
                         text = getattr(event, "delta", None)
@@ -113,38 +127,8 @@ class OpenAIService:
                             yield {"content": text, "error": None}
                         continue
 
-                    # If you ever want to surface "thinking" tokens:
-                    # NOTE: This is causing duplicates.
-                    # if hasattr(event, "chunk"):
-                    #     ch = event.chunk
-                    #     if getattr(ch, "choices", None):
-                    #         delta = ch.choices[0].delta
-                    #         if getattr(delta, "reasoning_content", None):
-                    #             yield {
-                    #                 "content": delta.reasoning_content,
-                    #                 "event": "reasoning",
-                    #                 "error": None,
-                    #             }
-                    #             continue
-                    #         elif getattr(delta, "content", None):
-                    #             yield {"content": delta.content, "event": "token", "error": None}
-                    #             continue
-
                     if et == "message.stop":
                         break
-
-                    # --- ChunkEvent wrapper (ChatCompletionChunk) ---
-                    # if hasattr(event, "chunk"):
-                    #     ch = event.chunk
-                    #     if getattr(ch, "choices", None):
-                    #         delta = ch.choices[0].delta
-                    #         # Prefer standard content
-                    #         if getattr(delta, "content", None):
-                    #             yield {"content": delta.content, "error": None}
-                    #         # Or ignore reasoning content (uncomment to surface)
-                    #         # elif getattr(delta, "reasoning_content", None):
-                    #         #     yield {"content": delta.reasoning_content, "reasoning": True, "error": None}
-                    #     continue
 
                     # --- Legacy OpenAI 0.x path (rare now) ---
                     if getattr(event, "choices", None):
@@ -207,16 +191,18 @@ class OpenAIService:
                 delta = self._dump_openai_model(getattr(choice, "delta", None)) or {}
                 tool_calls = delta.get("tool_calls") or []
                 content = delta.get("content")
+                reasoning = self._extract_reasoning_delta(delta)
                 finish_reason = getattr(choice, "finish_reason", None)
 
                 payload = {
                     "content": content,
+                    "reasoning": reasoning,
                     "tool_calls": tool_calls,
                     "finish_reason": finish_reason,
                     "usage": usage,
                     "error": None,
                 }
-                if content or tool_calls or finish_reason or usage:
+                if content or reasoning or tool_calls or finish_reason or usage:
                     yield payload
 
         except RateLimitError as e:
@@ -245,6 +231,55 @@ class OpenAIService:
         if hasattr(value, "model_dump"):
             return value.model_dump(exclude_none=True)
         return value
+
+    def _extract_reasoning_delta(self, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+
+        chunk = getattr(value, "chunk", None)
+        if chunk is not None:
+            text = self._extract_reasoning_delta(chunk)
+            if text:
+                return text
+
+        choices = None
+        if isinstance(value, dict):
+            choices = value.get("choices")
+        else:
+            choices = getattr(value, "choices", None)
+        if choices:
+            parts = []
+            for choice in choices:
+                delta = choice.get("delta") if isinstance(choice, dict) else getattr(choice, "delta", None)
+                text = self._extract_reasoning_delta(delta)
+                if text:
+                    parts.append(text)
+            if parts:
+                return "".join(parts)
+
+        for key in self._REASONING_DELTA_KEYS:
+            raw = value.get(key) if isinstance(value, dict) else getattr(value, key, None)
+            text = self._coerce_reasoning_text(raw)
+            if text:
+                return text
+
+        return None
+
+    def _coerce_reasoning_text(self, value: Any) -> Optional[str]:
+        if not value or isinstance(value, bool):
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            for key in self._TEXT_DELTA_KEYS:
+                text = self._coerce_reasoning_text(value.get(key))
+                if text:
+                    return text
+            return None
+        if isinstance(value, list):
+            parts = [text for item in value if (text := self._coerce_reasoning_text(item))]
+            return "".join(parts) if parts else None
+        return None
 
     async def create_chat_completion_response(
             self,

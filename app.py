@@ -505,6 +505,10 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                     break
 
                 content_chunk = chunk.get("content")
+                reasoning_chunk = chunk.get("reasoning")
+                if reasoning_chunk:
+                    yield {"event": "reasoning", "data": reasoning_chunk}
+
                 if content_chunk:
                     buffer.append(content_chunk)
                     yield {"event": "token", "data": content_chunk}
