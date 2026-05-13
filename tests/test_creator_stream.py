@@ -1,9 +1,11 @@
+import json
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
 import app as relay_app
+from app import _persist_creator_assistant_message_for_done
 from creator_stream import (
     CreatorContinuationRequest,
     CreatorStreamRequest,
@@ -92,6 +94,11 @@ class _JsonRequest:
         return self._payload
 
 
+class _StreamRequest(_JsonRequest):
+    async def is_disconnected(self):
+        return False
+
+
 class CreatorContinuationEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_continue_preserves_messages_without_synthesizing_tool_turns(self):
         messages = [
@@ -132,6 +139,115 @@ class CreatorContinuationEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(forwarded_payload["messages"]), 3)
         self.assertEqual(forwarded_payload["decision"], "approve")
         self.assertEqual(forwarded_payload["tool_result"], {"ok": True})
+
+
+class CreatorNativeToolPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_tool_stream_persists_awaiting_approval_message_and_done_id(self):
+        payload = {
+            "messages": [{"role": "user", "content": "Patch the draft"}],
+            "mode": "native_tools",
+            "creator_session_id": 123,
+            "stream_id": "creator-stream-1",
+            "assistant_turn_id": "turn-1",
+            "tools": [{"type": "function", "function": {"name": "apply_patch", "parameters": {"type": "object"}}}],
+        }
+
+        async def fake_native_turn(*args, **kwargs):
+            yield {"event": "token", "data": "I'll patch the draft now."}
+            yield {
+                "event": "creator_tool_call",
+                "data": {
+                    "stream_id": "creator-stream-1",
+                    "assistant_content": "I'll patch the draft now.",
+                    "tool_call_id": "call-1",
+                    "tool_name": "apply_patch",
+                    "arguments": {"title": "One"},
+                },
+            }
+            yield {
+                "event": "done",
+                "data": {
+                    "stream_id": "creator-stream-1",
+                    "status": "awaiting_tool_approval",
+                    "mode": "native_tools",
+                    "tool_call_count": 1,
+                },
+            }
+
+        with (
+            patch("app.verify_jwt", AsyncMock(return_value=("user-1", "token"))),
+            patch("app.get_creator_session", AsyncMock(return_value={"id": 123, "entity_type": "character"})),
+            patch("app.resolve_stream_bot", AsyncMock(return_value={"id": 9, "access_key": "key", "model": "model"})),
+            patch("app.openai_service.initialize_with_config", AsyncMock()),
+            patch("app.build_completion_request_kwargs", return_value={}),
+            patch("app.stream_creator_native_tool_turn", fake_native_turn),
+            patch("app.safe_post_creator_message", AsyncMock(return_value=[{"id": 777}])) as post_mock,
+            patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
+        ):
+            generator = await relay_app._stream_creator_native_tool_mode(
+                _StreamRequest(payload),
+                payload,
+                CreatorStreamRequest.model_validate(payload),
+            )
+            events = [event async for event in generator]
+
+        self.assertEqual([event["event"] for event in events], ["token", "creator_tool_call", "done"])
+        done_payload = json.loads(events[-1]["data"])
+        self.assertEqual(done_payload["message_id"], 777)
+        post_mock.assert_awaited_once()
+        self.assertEqual(post_mock.await_args.args[0]["content"], "I'll patch the draft now.")
+        self.assertEqual(post_mock.await_args.args[0]["creator_turn_id"], "turn-1")
+
+    async def test_persists_awaiting_tool_approval_assistant_text_with_turn_id(self):
+        done_payload = {
+            "stream_id": "creator-stream-1",
+            "status": "awaiting_tool_approval",
+            "mode": "native_tools",
+        }
+
+        with patch("app.safe_post_creator_message", AsyncMock(return_value=[{"id": 777}])) as post_mock:
+            result = await _persist_creator_assistant_message_for_done(
+                done_payload,
+                user_id="user-1",
+                creator_session_id=123,
+                content="I'll patch the draft now.",
+                stream_id="creator-stream-1",
+                auth_token="token",
+                creator_turn_id="turn-1",
+            )
+
+        post_mock.assert_awaited_once_with({
+            "user_id": "user-1",
+            "creator_session_id": 123,
+            "content": "I'll patch the draft now.",
+            "is_user_author": False,
+            "is_streaming": False,
+            "is_complete": True,
+            "stream_id": "creator-stream-1",
+            "creator_turn_id": "turn-1",
+        }, "token")
+        self.assertEqual(result["message_id"], 777)
+
+    async def test_does_not_persist_empty_awaiting_tool_approval_assistant_text(self):
+        done_payload = {
+            "stream_id": "creator-stream-1",
+            "status": "awaiting_tool_approval",
+            "mode": "native_tools",
+        }
+
+        with patch("app.safe_post_creator_message", AsyncMock()) as post_mock:
+            result = await _persist_creator_assistant_message_for_done(
+                done_payload,
+                user_id="user-1",
+                creator_session_id=123,
+                content="   ",
+                stream_id="creator-stream-1",
+                auth_token="token",
+                creator_turn_id="turn-1",
+            )
+
+        post_mock.assert_not_awaited()
+        self.assertNotIn("message_id", result)
 
 
 class CreatorNativeToolStreamTests(unittest.IsolatedAsyncioTestCase):

@@ -233,6 +233,64 @@ def _extract_persisted_id(persisted):
     return None
 
 
+def _build_creator_assistant_message_record(
+    *,
+    user_id: str,
+    creator_session_id: int | None,
+    content: str,
+    stream_id: str,
+    is_complete: bool,
+    creator_turn_id: str | None = None,
+) -> dict:
+    msg_record = {
+        "user_id": user_id,
+        "creator_session_id": creator_session_id,
+        "content": content,
+        "is_user_author": False,
+        "is_streaming": False,
+        "is_complete": is_complete,
+        "stream_id": stream_id,
+    }
+    if creator_turn_id:
+        msg_record["creator_turn_id"] = creator_turn_id
+    return msg_record
+
+
+async def _persist_creator_assistant_message_for_done(
+    done_payload: dict,
+    *,
+    user_id: str,
+    creator_session_id: int | None,
+    content: str,
+    stream_id: str,
+    auth_token: str,
+    creator_turn_id: str | None = None,
+    is_complete: bool = True,
+) -> dict:
+    if not content.strip():
+        return done_payload
+
+    msg_record = _build_creator_assistant_message_record(
+        user_id=user_id,
+        creator_session_id=creator_session_id,
+        content=content,
+        is_complete=is_complete,
+        stream_id=stream_id,
+        creator_turn_id=creator_turn_id,
+    )
+    log.debug("Persisting native tool creator message to Supabase - stream_id: %s", stream_id)
+    persisted = await safe_post_creator_message(msg_record, auth_token)
+    persisted_id = _extract_persisted_id(persisted)
+    if persisted_id:
+        done_payload["message_id"] = persisted_id
+    log.info(
+        "Native tool creator message persisted - stream_id: %s, message_id: %s",
+        stream_id,
+        persisted_id,
+    )
+    return done_payload
+
+
 def _serialize_sse_data(data):
     if isinstance(data, (dict, list)):
         return json.dumps(data)
@@ -303,6 +361,7 @@ async def _stream_creator_native_tool_mode(
     )
     stream_id = native_payload.stream_id or f"creator-tool-{int(time.time() * 1000)}"
     stream_payload = native_payload.model_copy(update={"stream_id": stream_id})
+    assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
 
     log.info(
         "Creator native tool configuration - provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
@@ -337,33 +396,19 @@ async def _stream_creator_native_tool_mode(
 
             if event["event"] == "done" and isinstance(event["data"], dict):
                 done_payload = dict(event["data"])
-                if done_payload.get("status") == "completed":
+                if done_payload.get("status") in {"completed", "awaiting_tool_approval"}:
                     final_text = "".join(buffered_content)
 
                     async def persist_and_build_done_payload():
-                        if not final_text:
-                            return done_payload
-
-                        msg_record = {
-                            "user_id": user_id,
-                            "creator_session_id": creator_session_id,
-                            "content": final_text,
-                            "is_user_author": False,
-                            "is_streaming": False,
-                            "is_complete": True,
-                            "stream_id": stream_id,
-                        }
-                        log.debug("Persisting native tool creator message to Supabase - stream_id: %s", stream_id)
-                        persisted = await safe_post_creator_message(msg_record, auth_token)
-                        persisted_id = _extract_persisted_id(persisted)
-                        if persisted_id:
-                            done_payload["message_id"] = persisted_id
-                        log.info(
-                            "Native tool creator message persisted - stream_id: %s, message_id: %s",
-                            stream_id,
-                            persisted_id,
+                        return await _persist_creator_assistant_message_for_done(
+                            done_payload,
+                            user_id=user_id,
+                            creator_session_id=creator_session_id,
+                            content=final_text,
+                            stream_id=stream_id,
+                            auth_token=auth_token,
+                            creator_turn_id=assistant_turn_id,
                         )
-                        return done_payload
 
                     try:
                         done_payload = await asyncio.shield(persist_and_build_done_payload())
@@ -538,15 +583,15 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                     return done_payload
 
                 if mode == "creator":
-                    msg_record = {
-                        "user_id": user_id,
-                        "creator_session_id": creator_session_id,
-                        "content": final_text,
-                        "is_user_author": False,
-                        "is_streaming": False,
-                        "is_complete": (not aborted),
-                        "stream_id": stream_id,
-                    }
+                    assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
+                    msg_record = _build_creator_assistant_message_record(
+                        user_id=user_id,
+                        creator_session_id=creator_session_id,
+                        content=final_text,
+                        is_complete=(not aborted),
+                        stream_id=stream_id,
+                        creator_turn_id=assistant_turn_id,
+                    )
                     log.debug("Persisting creator message to Supabase - stream_id: %s", stream_id)
                     persisted = await safe_post_creator_message(msg_record, auth_token)
                 else:
