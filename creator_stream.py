@@ -137,6 +137,19 @@ def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reaso
         }
 
 
+def _tool_name_from_delta(tool_call_delta: dict[str, Any]) -> str | None:
+    function = tool_call_delta.get("function") or {}
+    name = function.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _build_tool_call_start_event(tool_name: str | None) -> dict[str, Any]:
+    return {
+        "event": "creator_tool_call_start",
+        "data": {"tool_name": tool_name},
+    }
+
+
 def _accumulate_tool_call_delta(final_tool_calls: dict[int, dict[str, Any]], tool_call_delta: dict[str, Any]):
     index = tool_call_delta.get("index")
     if not isinstance(index, int):
@@ -181,6 +194,7 @@ async def stream_creator_native_tool_turn(
     completion_kwargs = completion_kwargs or {}
     content_parts: list[str] = []
     final_tool_calls: dict[int, dict[str, Any]] = {}
+    has_emitted_tool_call_start = False
     usage = None
     finish_reason = None
 
@@ -220,7 +234,15 @@ async def stream_creator_native_tool_turn(
             content_parts.append(content_chunk)
             yield {"event": "token", "data": content_chunk}
 
+        tool_call_start = chunk.get("tool_call_start") or {}
+        if tool_call_start and not has_emitted_tool_call_start:
+            yield _build_tool_call_start_event(tool_call_start.get("tool_name"))
+            has_emitted_tool_call_start = True
+
         for tool_call_delta in chunk.get("tool_calls") or []:
+            if not has_emitted_tool_call_start:
+                yield _build_tool_call_start_event(_tool_name_from_delta(tool_call_delta))
+                has_emitted_tool_call_start = True
             _accumulate_tool_call_delta(final_tool_calls, tool_call_delta)
 
     content = "".join(content_parts)

@@ -180,6 +180,11 @@ class OpenAIService:
             )
 
             async for chunk in stream:
+                tool_call_start = self._extract_tool_call_start(chunk)
+                if tool_call_start:
+                    yield {"tool_call_start": tool_call_start, "error": None}
+                    continue
+
                 usage = self._dump_openai_model(getattr(chunk, "usage", None))
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
@@ -220,6 +225,19 @@ class OpenAIService:
         except Exception as e:
             self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
             yield {"content": None, "tool_calls": None, "error": f"Unexpected error: {e}"}
+
+    def _extract_tool_call_start(self, value: Any) -> Optional[Dict[str, Any]]:
+        event_type = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+        if event_type != "content_block_start":
+            return None
+
+        content_block = value.get("content_block") if isinstance(value, dict) else getattr(value, "content_block", None)
+        content_block = self._dump_openai_model(content_block) or {}
+        if not isinstance(content_block, dict) or content_block.get("type") != "tool_use":
+            return None
+
+        name = content_block.get("name")
+        return {"tool_name": name if isinstance(name, str) and name else None}
 
     def _dump_openai_model(self, value: Any) -> Any:
         if value is None:
