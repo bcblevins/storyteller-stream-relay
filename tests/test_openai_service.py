@@ -19,14 +19,17 @@ class _AsyncStream:
 class _FakeCompletions:
     def __init__(self, chunks):
         self.chunks = chunks
+        self.last_kwargs = None
 
     async def create(self, **kwargs):
+        self.last_kwargs = kwargs
         return _AsyncStream(self.chunks)
 
 
 class _FakeClient:
     def __init__(self, chunks):
-        self.chat = SimpleNamespace(completions=_FakeCompletions(chunks))
+        self.completions = _FakeCompletions(chunks)
+        self.chat = SimpleNamespace(completions=self.completions)
 
 
 class OpenAIServiceReasoningTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +96,42 @@ class OpenAIServiceReasoningTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertEqual(events, [{"tool_call_start": {"tool_name": "apply_patch"}, "error": None}])
+
+    async def test_tool_stream_omits_non_positive_max_tokens(self):
+        service = OpenAIService()
+        service.initialized = True
+        service.client = _FakeClient([])
+
+        events = [
+            event
+            async for event in service.create_chat_completion_tool_stream(
+                messages=[{"role": "user", "content": "Patch"}],
+                model="deepseek-chat",
+                temperature=0.1,
+                max_tokens=0,
+            )
+        ]
+
+        self.assertEqual(events, [])
+        self.assertNotIn("max_tokens", service.client.completions.last_kwargs)
+
+    async def test_tool_stream_includes_positive_max_tokens(self):
+        service = OpenAIService()
+        service.initialized = True
+        service.client = _FakeClient([])
+
+        events = [
+            event
+            async for event in service.create_chat_completion_tool_stream(
+                messages=[{"role": "user", "content": "Patch"}],
+                model="deepseek-chat",
+                temperature=0.1,
+                max_tokens=2048,
+            )
+        ]
+
+        self.assertEqual(events, [])
+        self.assertEqual(service.client.completions.last_kwargs["max_tokens"], 2048)
 
 
 if __name__ == "__main__":

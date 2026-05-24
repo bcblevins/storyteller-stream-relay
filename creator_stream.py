@@ -186,7 +186,7 @@ async def stream_creator_native_tool_turn(
     *,
     model: str,
     temperature: float,
-    max_tokens: int,
+    max_tokens: int | None,
     bot: dict[str, Any],
     completion_kwargs: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:

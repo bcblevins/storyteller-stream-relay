@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic import ValidationError
 
 import app as relay_app
-from app import _persist_creator_assistant_message_for_done
+from app import _persist_creator_assistant_message_for_done, resolve_max_tokens
 from creator_stream import (
     CreatorContinuationRequest,
     CreatorStreamRequest,
@@ -14,6 +14,15 @@ from creator_stream import (
 
 
 class CreatorStreamRequestTests(unittest.TestCase):
+    def test_resolve_max_tokens_prefers_payload_and_treats_zero_as_unset(self):
+        self.assertIsNone(resolve_max_tokens({"max_tokens": 0}, {"max_tokens": 4096}))
+        self.assertEqual(resolve_max_tokens({"max_tokens": 2048}, {"max_tokens": 4096}), 2048)
+
+    def test_resolve_max_tokens_uses_bot_value_when_payload_omits_it(self):
+        self.assertIsNone(resolve_max_tokens({}, {"max_tokens": 0}))
+        self.assertEqual(resolve_max_tokens({}, {"max_tokens": 4096}), 4096)
+        self.assertEqual(resolve_max_tokens({}, {}), 1000)
+
     def test_native_tools_mode_requires_tools(self):
         with self.assertRaises(ValidationError):
             CreatorStreamRequest(messages=[], mode="native_tools")

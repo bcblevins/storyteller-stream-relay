@@ -11,6 +11,25 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _chat_completion_kwargs(
+        *,
+        model: str,
+        messages: List[ChatCompletionMessageParam],
+        temperature: float,
+        max_tokens: Optional[int],
+        **kwargs,
+) -> Dict[str, Any]:
+    request_kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        **kwargs,
+    }
+    if isinstance(max_tokens, int) and max_tokens > 0:
+        request_kwargs["max_tokens"] = max_tokens
+    return request_kwargs
+
+
 class OpenAIService:
     _REASONING_DELTA_KEYS = (
         "reasoning_content",
@@ -84,7 +103,7 @@ class OpenAIService:
             messages: List[ChatCompletionMessageParam],
             model: str = "deepseek-chat",
             temperature: float = 0.7,
-            max_tokens: int = 1000,
+            max_tokens: Optional[int] = 1000,
             bot_config: Optional[Dict] = None,
             **kwargs
     ) -> AsyncGenerator[Dict, None]:
@@ -105,13 +124,13 @@ class OpenAIService:
         self._ensure_initialized()
         count = 0
         try:
-            async with self.client.chat.completions.stream(
+            async with self.client.chat.completions.stream(**_chat_completion_kwargs(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 **kwargs
-            ) as stream:
+            )) as stream:
                 count = 0
                 async for event in stream:
                     et = getattr(event, "type", None)
@@ -154,7 +173,7 @@ class OpenAIService:
             messages: List[ChatCompletionMessageParam],
             model: str = "deepseek-chat",
             temperature: float = 0.7,
-            max_tokens: int = 1000,
+            max_tokens: Optional[int] = 1000,
             bot_config: Optional[Dict] = None,
             tools: Optional[List[Dict[str, Any]]] = None,
             tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
@@ -167,7 +186,7 @@ class OpenAIService:
         self._ensure_initialized()
 
         try:
-            stream = await self.client.chat.completions.create(
+            stream = await self.client.chat.completions.create(**_chat_completion_kwargs(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -177,7 +196,7 @@ class OpenAIService:
                 parallel_tool_calls=parallel_tool_calls,
                 stream=True,
                 **kwargs
-            )
+            ))
 
             async for chunk in stream:
                 tool_call_start = self._extract_tool_call_start(chunk)
@@ -304,7 +323,7 @@ class OpenAIService:
             messages: List[ChatCompletionMessageParam],
             model: str = "deepseek-chat",
             temperature: float = 0.7,
-            max_tokens: int = 1000,
+            max_tokens: Optional[int] = 1000,
             bot_config: Optional[Dict] = None,
             **kwargs
     ) -> Dict[str, Any]:
@@ -314,14 +333,14 @@ class OpenAIService:
         self._ensure_initialized()
 
         try:
-            response = await self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(**_chat_completion_kwargs(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=False,
                 **kwargs
-            )
+            ))
 
             choice = response.choices[0] if response.choices else None
             message = choice.message.model_dump(exclude_none=True) if choice and choice.message else None
@@ -355,7 +374,7 @@ class OpenAIService:
             messages: List[ChatCompletionMessageParam],
             model: str = "deepseek-chat",
             temperature: float = 0.7,
-            max_tokens: int = 1000,
+            max_tokens: Optional[int] = 1000,
             bot_config: Optional[Dict] = None,
             **kwargs
     ) -> Dict:
@@ -376,14 +395,14 @@ class OpenAIService:
         self._ensure_initialized()
 
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.chat.completions.create(**_chat_completion_kwargs(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=False,
                 **kwargs
-            )
+            ))
 
             return {
                 "content": response.choices[0].message.content,

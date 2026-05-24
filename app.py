@@ -203,6 +203,21 @@ def check_rate_limit(user_id: str, limit=5, window=60):
         raise HTTPException(429, f"Rate limit exceeded ({limit}/min)")
 
 
+def normalize_max_tokens(value) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def resolve_max_tokens(payload: dict, bot: dict, default: int = 1000) -> int | None:
+    raw_value = payload["max_tokens"] if "max_tokens" in payload else bot.get("max_tokens", default)
+    return normalize_max_tokens(raw_value)
+
+
 async def resolve_stream_bot(
     user_id: str,
     auth_token: str,
@@ -346,7 +361,7 @@ async def _stream_creator_native_tool_mode(
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         model = settings.OPENROUTER_DEMO_MODEL
     temperature = bot.get("temperature", 0.1)
-    max_tokens = bot.get("max_tokens", 1000)
+    max_tokens = resolve_max_tokens(payload, bot)
     transform_config = build_transform_config()
     provider = detect_completion_provider(
         base_url=base_url,
@@ -491,7 +506,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         model = settings.OPENROUTER_DEMO_MODEL
     temperature = bot.get("temperature", 0.1)
-    max_tokens = bot.get("max_tokens", 1000)
+    max_tokens = resolve_max_tokens(payload, bot)
     transform_config = build_transform_config()
     provider = detect_completion_provider(
         base_url=base_url,
