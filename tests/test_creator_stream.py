@@ -185,6 +185,7 @@ class CreatorNativeToolPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.verify_jwt", AsyncMock(return_value=("user-1", "token"))),
+            patch("app.get_workspace_conversation", AsyncMock(return_value=None)),
             patch("app.get_creator_session", AsyncMock(return_value={"id": 123, "entity_type": "character"})),
             patch("app.resolve_stream_bot", AsyncMock(return_value={"id": 9, "access_key": "key", "model": "model"})),
             patch("app.openai_service.initialize_with_config", AsyncMock()),
@@ -206,6 +207,35 @@ class CreatorNativeToolPersistenceTests(unittest.IsolatedAsyncioTestCase):
         post_mock.assert_awaited_once()
         self.assertEqual(post_mock.await_args.args[0]["content"], "I'll patch the draft now.")
         self.assertEqual(post_mock.await_args.args[0]["creator_turn_id"], "turn-1")
+
+    async def test_persists_workspace_creator_message_when_conversation_resolves(self):
+        done_payload = {
+            "stream_id": "creator-stream-1",
+            "status": "awaiting_tool_approval",
+            "mode": "native_tools",
+        }
+
+        with patch("app.safe_post_workspace_conversation_message", AsyncMock(return_value=[{"id": 888}])) as post_mock:
+            result = await _persist_creator_assistant_message_for_done(
+                done_payload,
+                user_id="user-1",
+                creator_session_id=123,
+                workspace_conversation={"id": 456},
+                content="I'll patch the draft now.",
+                stream_id="creator-stream-1",
+                auth_token="token",
+                creator_turn_id="turn-1",
+            )
+
+        post_mock.assert_awaited_once_with({
+            "conversation_id": 456,
+            "role": "assistant",
+            "content": "I'll patch the draft now.",
+            "status": "complete",
+            "stream_id": "creator-stream-1",
+            "turn_id": "turn-1",
+        }, "token")
+        self.assertEqual(result["message_id"], 888)
 
     async def test_persists_awaiting_tool_approval_assistant_text_with_turn_id(self):
         done_payload = {

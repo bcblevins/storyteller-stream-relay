@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # app.py
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -28,9 +30,12 @@ from supabase import (
     get_bot,
     get_default_bot,
     get_conversation_bot,
+    get_workspace_conversation,
+    get_workspace_conversation_bot,
     get_creator_session,
     post_message,
     post_creator_message,
+    post_workspace_conversation_message,
     post_message_alternative,
     get_message,
     update_message_alternative,
@@ -124,6 +129,18 @@ async def safe_post_creator_message(msg, token: str):
             if attempt == 2:
                 raise
             log.warning(f"Retrying creator message write ({attempt+1}/3): {e}")
+            await asyncio.sleep(1)
+    return None
+
+
+async def safe_post_workspace_conversation_message(msg, token: str):
+    for attempt in range(3):
+        try:
+            return await post_workspace_conversation_message(msg, token)
+        except Exception as e:
+            if attempt == 2:
+                raise
+            log.warning(f"Retrying workspace conversation message write ({attempt+1}/3): {e}")
             await asyncio.sleep(1)
     return None
 
@@ -223,10 +240,18 @@ async def resolve_stream_bot(
     auth_token: str,
     desired_bot_id,
     conversation_id=None,
+    workspace_conversation=None,
 ):
     if isinstance(desired_bot_id, int):
         log.debug("Using explicit bot_id: %s", desired_bot_id)
         return await get_bot(user_id, desired_bot_id, auth_token)
+
+    if workspace_conversation is not None:
+        bot = await get_workspace_conversation_bot(user_id, workspace_conversation, auth_token)
+        if bot is not None:
+            return bot
+        log.debug("No workspace conversation bot found, falling back to default bot")
+        return await get_default_bot(user_id, auth_token)
 
     if isinstance(conversation_id, int):
         log.debug("Using conversation bot for conversation_id: %s", conversation_id)
@@ -271,11 +296,32 @@ def _build_creator_assistant_message_record(
     return msg_record
 
 
+def _build_workspace_conversation_assistant_message_record(
+    *,
+    conversation_id: int,
+    content: str,
+    stream_id: str,
+    is_complete: bool,
+    creator_turn_id: str | None = None,
+) -> dict:
+    msg_record = {
+        "conversation_id": conversation_id,
+        "role": "assistant",
+        "content": content,
+        "status": "complete" if is_complete else "aborted",
+        "stream_id": stream_id,
+    }
+    if creator_turn_id:
+        msg_record["turn_id"] = creator_turn_id
+    return msg_record
+
+
 async def _persist_creator_assistant_message_for_done(
     done_payload: dict,
     *,
     user_id: str,
     creator_session_id: int | None,
+    workspace_conversation: dict | None = None,
     content: str,
     stream_id: str,
     auth_token: str,
@@ -285,16 +331,27 @@ async def _persist_creator_assistant_message_for_done(
     if not content.strip():
         return done_payload
 
-    msg_record = _build_creator_assistant_message_record(
-        user_id=user_id,
-        creator_session_id=creator_session_id,
-        content=content,
-        is_complete=is_complete,
-        stream_id=stream_id,
-        creator_turn_id=creator_turn_id,
-    )
-    log.debug("Persisting native tool creator message to Supabase - stream_id: %s", stream_id)
-    persisted = await safe_post_creator_message(msg_record, auth_token)
+    if workspace_conversation is not None:
+        msg_record = _build_workspace_conversation_assistant_message_record(
+            conversation_id=workspace_conversation.get("id"),
+            content=content,
+            is_complete=is_complete,
+            stream_id=stream_id,
+            creator_turn_id=creator_turn_id,
+        )
+        log.debug("Persisting workspace creator message to Supabase - stream_id: %s", stream_id)
+        persisted = await safe_post_workspace_conversation_message(msg_record, auth_token)
+    else:
+        msg_record = _build_creator_assistant_message_record(
+            user_id=user_id,
+            creator_session_id=creator_session_id,
+            content=content,
+            is_complete=is_complete,
+            stream_id=stream_id,
+            creator_turn_id=creator_turn_id,
+        )
+        log.debug("Persisting legacy creator message to Supabase - stream_id: %s", stream_id)
+        persisted = await safe_post_creator_message(msg_record, auth_token)
     persisted_id = _extract_persisted_id(persisted)
     if persisted_id:
         done_payload["message_id"] = persisted_id
@@ -327,12 +384,18 @@ async def _stream_creator_native_tool_mode(
     if not isinstance(creator_session_id, int):
         raise HTTPException(400, "creator_session_id is required")
 
-    creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+    workspace_conversation = await get_workspace_conversation(creator_session_id, user_id, auth_token)
+    if workspace_conversation is not None:
+        creator_session_kind = "workspace_conversation"
+    else:
+        creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+        creator_session_kind = creator_session.get("entity_type")
     log.info(
-        "Creator native tool request - User: %s, creator_session_id: %s, entity_type: %s, messages_count: %d",
+        "Creator native tool request - User: %s, creator_session_id: %s, workspace_conversation_id: %s, creator_session_kind: %s, messages_count: %d",
         user_id,
         creator_session_id,
-        creator_session.get("entity_type"),
+        workspace_conversation.get("id") if workspace_conversation else None,
+        creator_session_kind,
         len(messages),
     )
 
@@ -341,6 +404,7 @@ async def _stream_creator_native_tool_mode(
         auth_token=auth_token,
         desired_bot_id=desired_bot_id,
         conversation_id=None,
+        workspace_conversation=workspace_conversation,
     )
     log.debug("Selected native tool bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
@@ -419,6 +483,7 @@ async def _stream_creator_native_tool_mode(
                             done_payload,
                             user_id=user_id,
                             creator_session_id=creator_session_id,
+                            workspace_conversation=workspace_conversation,
                             content=final_text,
                             stream_id=stream_id,
                             auth_token=auth_token,
@@ -448,6 +513,8 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     desired_bot_id = payload.get("bot_id")
     conversation_id = payload.get("conversation_id") if mode == "conversation" else None
     creator_session_id = payload.get("creator_session_id") if mode == "creator" else None
+    workspace_conversation = None
+    creator_session = None
     messages = payload.get("messages", [])
 
     if not isinstance(messages, list) or not messages:
@@ -456,12 +523,18 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     if mode == "creator":
         if not isinstance(creator_session_id, int):
             raise HTTPException(400, "creator_session_id is required")
-        creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+        workspace_conversation = await get_workspace_conversation(creator_session_id, user_id, auth_token)
+        if workspace_conversation is not None:
+            creator_session_kind = "workspace_conversation"
+        else:
+            creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
+            creator_session_kind = creator_session.get("entity_type")
         log.info(
-            "Creator stream request - User: %s, creator_session_id: %s, entity_type: %s, messages_count: %d",
+            "Creator stream request - User: %s, creator_session_id: %s, workspace_conversation_id: %s, creator_session_kind: %s, messages_count: %d",
             user_id,
             creator_session_id,
-            creator_session.get("entity_type"),
+            workspace_conversation.get("id") if workspace_conversation else None,
+            creator_session_kind,
             len(messages),
         )
     else:
@@ -484,6 +557,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         auth_token=auth_token,
         desired_bot_id=desired_bot_id,
         conversation_id=conversation_id,
+        workspace_conversation=workspace_conversation,
     )
     log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
@@ -599,16 +673,18 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
 
                 if mode == "creator":
                     assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
-                    msg_record = _build_creator_assistant_message_record(
+                    done_payload = await _persist_creator_assistant_message_for_done(
+                        done_payload,
                         user_id=user_id,
                         creator_session_id=creator_session_id,
+                        workspace_conversation=workspace_conversation,
                         content=final_text,
                         is_complete=(not aborted),
                         stream_id=stream_id,
+                        auth_token=auth_token,
                         creator_turn_id=assistant_turn_id,
                     )
-                    log.debug("Persisting creator message to Supabase - stream_id: %s", stream_id)
-                    persisted = await safe_post_creator_message(msg_record, auth_token)
+                    return done_payload
                 else:
                     msg_record = {
                         "user_id": user_id,

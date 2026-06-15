@@ -108,6 +108,60 @@ async def get_conversation_bot(user_id: str, conversation_id: int, token: str):
     log.info("Conversation bot found - bot_id: %s", bot_id)
     return await get_bot(user_id, bot_id, token)
 
+async def get_workspace_conversation(creator_session_id: int, user_id: str, token: str):
+    """
+    Resolve the current creator-session compat id to a workspace conversation.
+
+    New creator sessions are backed by workspace_conversations.id. Legacy
+    creator sessions were backfilled with workspace_conversations.legacy_creator_session_id.
+    """
+    log.info(
+        "Getting workspace conversation - creator_session_id: %s, user_id: %s",
+        creator_session_id,
+        user_id,
+    )
+
+    params = {
+        "id": f"eq.{creator_session_id}",
+        "select": "id,workspace_id,bot_id,status,legacy_creator_session_id",
+        "limit": 1,
+    }
+    data = await _rest_get("workspace_conversations", params, token)
+    if data:
+        log.info("Workspace conversation found by id - id: %s", data[0].get("id"))
+        return data[0]
+
+    params = {
+        "legacy_creator_session_id": f"eq.{creator_session_id}",
+        "select": "id,workspace_id,bot_id,status,legacy_creator_session_id",
+        "order": "updated_at.desc,id.desc",
+        "limit": 1,
+    }
+    data = await _rest_get("workspace_conversations", params, token)
+    if data:
+        log.info(
+            "Workspace conversation found by legacy_creator_session_id - id: %s, legacy_creator_session_id: %s",
+            data[0].get("id"),
+            creator_session_id,
+        )
+        return data[0]
+
+    log.info(
+        "No workspace conversation found - creator_session_id: %s, user_id: %s",
+        creator_session_id,
+        user_id,
+    )
+    return None
+
+async def get_workspace_conversation_bot(user_id: str, conversation: dict, token: str):
+    """Fetch the bot selected for a workspace conversation, if one is configured."""
+    bot_id = conversation.get("bot_id") if conversation else None
+    if bot_id is None:
+        log.info("Workspace conversation has no bot_id - conversation_id: %s", conversation.get("id") if conversation else None)
+        return None
+    log.info("Workspace conversation bot found - bot_id: %s", bot_id)
+    return await get_bot(user_id, int(bot_id), token)
+
 async def _rest_post(path: str, data: dict, token: str):
     """POST data to Supabase REST endpoint."""
     headers = {
@@ -178,6 +232,11 @@ async def post_message(message: dict, token: str):
 async def post_creator_message(message: dict, token: str):
     """Write a creator message record to Supabase REST endpoint."""
     return await _rest_post("creator_messages", message, token)
+
+
+async def post_workspace_conversation_message(message: dict, token: str):
+    """Write a workspace conversation message record to Supabase REST endpoint."""
+    return await _rest_post("conversation_messages", message, token)
 
 
 async def post_message_alternative(alternative: dict, token: str):
