@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     FORCE_REASONING_OVERRIDE: bool = False
     ENABLE_SYSTEM_INJECTION_TAG: bool = True
     SYSTEM_INJECTION_TAG_NAME: str = "injection"
+    ENABLE_SYSTEM_THINKING_TAG: bool = True
+    SYSTEM_THINKING_TAG_NAME: str = "thinking"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

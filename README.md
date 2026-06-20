@@ -108,6 +108,8 @@ If `FORCE_REASONING_EFFORT` is set, that value is also attached where supported.
 * `FORCE_REASONING_OVERRIDE` (default: `false`)
 * `ENABLE_SYSTEM_INJECTION_TAG` (default: `true`)
 * `SYSTEM_INJECTION_TAG_NAME` (default: `injection`)
+* `ENABLE_SYSTEM_THINKING_TAG` (default: `true`)
+* `SYSTEM_THINKING_TAG_NAME` (default: `thinking`)
 
 Example:
 
@@ -119,12 +121,22 @@ export FORCE_REASONING_MODEL_PATTERNS="*"
 export FORCE_REASONING_OVERRIDE="false"
 export ENABLE_SYSTEM_INJECTION_TAG="true"
 export SYSTEM_INJECTION_TAG_NAME="injection"
+export ENABLE_SYSTEM_THINKING_TAG="true"
+export SYSTEM_THINKING_TAG_NAME="thinking"
 ```
 
 When `ENABLE_SYSTEM_INJECTION_TAG=true`, the proxy scans system messages for
 `<injection>...</injection>` (or your configured tag), removes those blocks from
 system content, and appends the extracted text to the latest message before
 sending to OpenRouter.
+
+When `ENABLE_SYSTEM_THINKING_TAG=true`, the proxy scans system messages for
+`<thinking>...</thinking>` (or your configured tag), removes those blocks from
+system content, and maps the extracted control to provider reasoning settings.
+Supported values are `enabled`, `disabled`, effort-only values like `high` or
+`max`, and combined values like `enabled:max`. For OpenRouter this maps to the
+`reasoning` object; for DeepSeek-compatible requests this maps to
+`extra_body.thinking` plus `reasoning_effort` when an effort is supplied.
 
 ### Usage Example
 

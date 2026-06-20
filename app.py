@@ -22,6 +22,7 @@ from request_transforms import (
     TransformConfig,
     apply_provider_request_transforms,
     apply_system_injection_tag_transform,
+    apply_system_thinking_tag_transform,
     build_completion_request_kwargs,
     detect_completion_provider,
     normalize_completion_base_url,
@@ -183,6 +184,8 @@ def build_transform_config() -> TransformConfig:
         force_reasoning_override=settings.FORCE_REASONING_OVERRIDE,
         enable_system_injection_tag=settings.ENABLE_SYSTEM_INJECTION_TAG,
         system_injection_tag_name=settings.SYSTEM_INJECTION_TAG_NAME,
+        enable_system_thinking_tag=settings.ENABLE_SYSTEM_THINKING_TAG,
+        system_thinking_tag_name=settings.SYSTEM_THINKING_TAG_NAME,
     )
 
 
@@ -740,6 +743,10 @@ async def chat_completions_proxy(request: Request):
     transform_config = build_transform_config()
     transformed_payload = apply_system_injection_tag_transform(
         payload=payload,
+        config=transform_config,
+    )
+    transformed_payload = apply_system_thinking_tag_transform(
+        payload=transformed_payload,
         config=transform_config,
     )
     transformed_payload = apply_provider_request_transforms(

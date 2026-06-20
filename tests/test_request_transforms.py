@@ -4,6 +4,7 @@ from request_transforms import (
     TransformConfig,
     apply_provider_request_transforms,
     apply_system_injection_tag_transform,
+    apply_system_thinking_tag_transform,
     build_completion_request_kwargs,
     detect_completion_provider,
     normalize_completion_base_url,
@@ -238,6 +239,116 @@ class RequestTransformsTest(unittest.TestCase):
         self.assertNotIn("<injection>", out["messages"][1]["content"])
         self.assertIn("first", out["messages"][2]["content"])
         self.assertIn("second", out["messages"][2]["content"])
+
+    def test_extracts_thinking_disabled_tag_for_openrouter_reasoning(self):
+        payload = {
+            "model": "z-ai/glm-4.6:nitro",
+            "messages": [
+                {"role": "system", "content": "Base <thinking>disabled</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(
+            enable_system_thinking_tag=True,
+            system_thinking_tag_name="thinking",
+            force_reasoning_enabled=True,
+        )
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "openrouter", payload["model"], config)
+
+        self.assertNotIn("<thinking>", out["messages"][0]["content"])
+        self.assertEqual(out["reasoning"]["enabled"], False)
+        self.assertEqual(out["reasoning"]["effort"], "none")
+
+    def test_extracts_thinking_effort_tag_for_openrouter_reasoning(self):
+        payload = {
+            "model": "z-ai/glm-4.6:nitro",
+            "messages": [
+                {"role": "system", "content": "<thinking>enabled:max</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(enable_system_thinking_tag=True, system_thinking_tag_name="thinking")
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "openrouter", payload["model"], config)
+
+        self.assertEqual(out["reasoning"]["enabled"], True)
+        self.assertEqual(out["reasoning"]["effort"], "max")
+
+    def test_extracts_effort_only_thinking_tag_for_deepseek(self):
+        payload = {
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {"role": "system", "content": "<thinking>high</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(enable_system_thinking_tag=True, system_thinking_tag_name="thinking")
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "deepseek", payload["model"], config)
+
+        self.assertEqual(out["extra_body"]["thinking"]["type"], "enabled")
+        self.assertEqual(out["reasoning_effort"], "high")
+
+    def test_extracts_thinking_disabled_tag_for_deepseek(self):
+        payload = {
+            "model": "deepseek-v4-pro",
+            "messages": [
+                {"role": "system", "content": "<thinking>off</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(enable_system_thinking_tag=True, system_thinking_tag_name="thinking")
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "deepseek", payload["model"], config)
+
+        self.assertEqual(out["extra_body"]["thinking"]["type"], "disabled")
+        self.assertNotIn("reasoning_effort", out)
+
+    def test_thinking_tag_does_not_override_explicit_openrouter_reasoning_by_default(self):
+        payload = {
+            "model": "z-ai/glm-4.6:nitro",
+            "reasoning": {"enabled": True, "effort": "low"},
+            "messages": [
+                {"role": "system", "content": "<thinking>disabled</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(
+            enable_system_thinking_tag=True,
+            system_thinking_tag_name="thinking",
+            force_reasoning_override=False,
+        )
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "openrouter", payload["model"], config)
+
+        self.assertEqual(out["reasoning"], {"enabled": True, "effort": "low"})
+
+    def test_thinking_tag_overrides_explicit_openrouter_reasoning_when_override_enabled(self):
+        payload = {
+            "model": "z-ai/glm-4.6:nitro",
+            "reasoning": {"enabled": True, "effort": "low"},
+            "messages": [
+                {"role": "system", "content": "<thinking>disabled</thinking>"},
+                {"role": "user", "content": "hi"},
+            ],
+        }
+        config = TransformConfig(
+            enable_system_thinking_tag=True,
+            system_thinking_tag_name="thinking",
+            force_reasoning_override=True,
+        )
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = apply_provider_request_transforms(transformed, "openrouter", payload["model"], config)
+
+        self.assertEqual(out["reasoning"]["enabled"], False)
+        self.assertEqual(out["reasoning"]["effort"], "none")
 
 
 if __name__ == "__main__":

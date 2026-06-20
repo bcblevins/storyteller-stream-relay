@@ -16,10 +16,16 @@ class TransformConfig:
     force_reasoning_override: bool = False
     enable_system_injection_tag: bool = False
     system_injection_tag_name: str = "injection"
+    enable_system_thinking_tag: bool = False
+    system_thinking_tag_name: str = "thinking"
 
 
 _OPENAI_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 _REASONING_REQUEST_FIELDS = ("reasoning", "reasoning_effort", "thinking", "extra_body")
+_THINKING_CONTROL_KEY = "_relay_thinking_control"
+_THINKING_ENABLED_VALUES = {"enabled", "enable", "on", "true", "yes", "1"}
+_THINKING_DISABLED_VALUES = {"disabled", "disable", "off", "false", "no", "0", "none"}
+_THINKING_EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh", "max"}
 
 
 def _model_matches(model: str, patterns: tuple[str, ...]) -> bool:
@@ -169,6 +175,34 @@ def _apply_openrouter_reasoning(
     return out
 
 
+def _apply_openrouter_thinking_control(
+    payload: dict[str, Any],
+    control: dict[str, Any],
+    config: TransformConfig,
+) -> dict[str, Any]:
+    out = dict(payload)
+    has_reasoning = _has_explicit_reasoning_controls(out, "reasoning")
+    if has_reasoning and not config.force_reasoning_override:
+        return out
+
+    reasoning: dict[str, Any] = {}
+    if isinstance(out.get("reasoning"), dict):
+        reasoning = dict(out["reasoning"])
+    elif isinstance(out.get("extra_body"), dict) and isinstance(out["extra_body"].get("reasoning"), dict):
+        reasoning = dict(out["extra_body"]["reasoning"])
+
+    enabled = bool(control.get("enabled"))
+    reasoning["enabled"] = enabled
+    effort = control.get("effort")
+    if isinstance(effort, str) and effort:
+        reasoning["effort"] = effort
+    elif not enabled:
+        reasoning["effort"] = "none"
+
+    out["reasoning"] = reasoning
+    return out
+
+
 def _apply_openai_reasoning(
     payload: dict[str, Any],
     model: str,
@@ -233,6 +267,32 @@ def _apply_deepseek_thinking(payload: dict[str, Any], model: str, config: Transf
     )
 
 
+def _apply_deepseek_thinking_control(
+    payload: dict[str, Any],
+    control: dict[str, Any],
+    config: TransformConfig,
+) -> dict[str, Any]:
+    out = dict(payload)
+    has_thinking = _has_explicit_reasoning_controls(out, "thinking", "reasoning_effort")
+    if has_thinking and not config.force_reasoning_override:
+        return out
+
+    enabled = bool(control.get("enabled"))
+    extra_body = dict(out.get("extra_body") or {})
+    thinking = dict(extra_body.get("thinking") or {})
+    thinking["type"] = "enabled" if enabled else "disabled"
+    extra_body["thinking"] = thinking
+    out["extra_body"] = extra_body
+
+    effort = control.get("effort")
+    if enabled and isinstance(effort, str) and effort:
+        out["reasoning_effort"] = effort
+    elif not enabled:
+        out.pop("reasoning_effort", None)
+
+    return out
+
+
 def _is_openai_reasoning_model(model: str) -> bool:
     normalized_model = _normalized_model_name(model)
     if "/" in normalized_model:
@@ -248,6 +308,15 @@ def apply_provider_request_transforms(
 ) -> dict[str, Any]:
     """Apply provider/model-specific request transforms without mutating input payload."""
     out = dict(payload)
+    thinking_control = out.pop(_THINKING_CONTROL_KEY, None)
+
+    if isinstance(thinking_control, dict):
+        normalized_provider = (provider or "").strip().lower()
+        if normalized_provider == "openrouter":
+            return _apply_openrouter_thinking_control(out, thinking_control, config)
+        if normalized_provider == "deepseek":
+            return _apply_deepseek_thinking_control(out, thinking_control, config)
+        return out
 
     if not config.force_reasoning_enabled:
         return out
@@ -273,6 +342,34 @@ def _extract_injection_blocks(text: str, tag_name: str) -> tuple[str, list[str]]
     captured: list[str] = [m.strip() for m in pattern.findall(text) if m and m.strip()]
     cleaned = pattern.sub("", text)
     return cleaned, captured
+
+
+def _parse_thinking_control(raw_value: str) -> dict[str, Any] | None:
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return None
+
+    parts = [part.strip() for part in re.split(r"[:=,\s]+", normalized) if part.strip()]
+    if not parts:
+        return None
+
+    enabled: bool | None = None
+    effort: str | None = None
+    for part in parts:
+        if part in _THINKING_ENABLED_VALUES:
+            enabled = True
+            continue
+        if part in _THINKING_DISABLED_VALUES:
+            enabled = False
+            continue
+        if part in _THINKING_EFFORT_VALUES:
+            effort = part
+            enabled = True if enabled is None else enabled
+
+    if enabled is None:
+        return None
+
+    return {"enabled": enabled, "effort": effort}
 
 
 def _append_text_to_message_content(content: Any, appended: str) -> Any:
@@ -347,4 +444,48 @@ def apply_system_injection_tag_transform(payload: dict[str, Any], config: Transf
         "content": _append_text_to_message_content(last_msg.get("content"), injection_text),
     }
     out["messages"] = updated_messages
+    return out
+
+
+def apply_system_thinking_tag_transform(payload: dict[str, Any], config: TransformConfig) -> dict[str, Any]:
+    """Extract <thinking>...</thinking> controls from system messages for provider mapping."""
+    out = dict(payload)
+    if not config.enable_system_thinking_tag:
+        return out
+
+    tag_name = (config.system_thinking_tag_name or "thinking").strip()
+    if not tag_name:
+        return out
+
+    messages = out.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return out
+
+    extracted_chunks: list[str] = []
+    updated_messages = list(messages)
+
+    for idx, msg in enumerate(updated_messages):
+        if not isinstance(msg, dict) or msg.get("role") != "system":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+
+        cleaned, captured = _extract_injection_blocks(content, tag_name)
+        if captured:
+            extracted_chunks.extend(captured)
+            updated_messages[idx] = {**msg, "content": cleaned.strip()}
+
+    if not extracted_chunks:
+        return out
+
+    control = None
+    for chunk in extracted_chunks:
+        parsed = _parse_thinking_control(chunk)
+        if parsed:
+            control = parsed
+
+    out["messages"] = updated_messages
+    if control:
+        out[_THINKING_CONTROL_KEY] = control
     return out
