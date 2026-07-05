@@ -183,27 +183,6 @@ async def _rest_post(path: str, data: dict, token: str):
     log.info("Supabase POST successful")
     return resp.json()
 
-async def _rest_patch(path: str, data: dict, token: str):
-    """PATCH data to Supabase REST endpoint."""
-    headers = {
-        **_build_headers(token),
-        "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates,return=representation",
-    }
-    url = f"{settings.SUPABASE_REST_URL}/{path}"
-    log.info("Supabase PATCH - url: %s, data: %s", url, _sanitize_for_log(data))
-    
-    async with httpx.AsyncClient() as client:
-        resp = await client.patch(url, headers=headers, json=data)
-    
-    log.debug("Supabase PATCH response - status: %s, body: %s", resp.status_code, resp.text)
-    if resp.status_code != 200:
-        log.error("Supabase update failed - status: %s, error: %s", resp.status_code, resp.text)
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Supabase update failed: {resp.text}")
-    
-    log.info("Supabase PATCH successful")
-    return resp.json()
-
 async def _rest_rpc(function_name: str, data: dict, token: str):
     """POST data to Supabase RPC endpoint."""
     headers = {
@@ -224,11 +203,6 @@ async def _rest_rpc(function_name: str, data: dict, token: str):
     log.info("Supabase RPC successful")
     return resp.json()
 
-async def post_message(message: dict, token: str):
-    """Write a message record to Supabase REST endpoint."""
-    return await _rest_post("messages", message, token)
-
-
 async def post_creator_message(message: dict, token: str):
     """Write a creator message record to Supabase REST endpoint."""
     return await _rest_post("creator_messages", message, token)
@@ -238,27 +212,6 @@ async def post_workspace_conversation_message(message: dict, token: str):
     """Write a workspace conversation message record to Supabase REST endpoint."""
     return await _rest_post("conversation_messages", message, token)
 
-
-async def post_message_alternative(alternative: dict, token: str):
-    """Write a message alternative record to Supabase REST endpoint."""
-    return await _rest_post("message_alternatives", alternative, token)
-
-async def update_message_alternative(alternative_id: int, updates: dict, token: str):
-    """Update an existing message alternative record."""
-    return await _rest_patch(f"message_alternatives?id=eq.{alternative_id}", updates, token)
-
-async def get_message_alternatives(parent_message_id: int, user_id: str, token: str):
-    """Get all alternatives for a parent message."""
-    log.info("Getting message alternatives - parent_message_id: %s, user_id: %s", parent_message_id, user_id)
-    params = {
-        "parent_message_id": f"eq.{parent_message_id}",
-        "user_id": f"eq.{user_id}",
-        "order": "t.asc"
-    }
-    
-    data = await _rest_get("message_alternatives", params, token)
-    log.info("Found %d message alternatives", len(data))
-    return data
 
 async def get_openrouter_demo_bot(user_id: str, token: str):
     """Get existing OpenRouter demo bot for a user, if any."""
@@ -294,78 +247,6 @@ async def create_demo_openrouter_bot(
     if isinstance(result, dict):
         return result.get("bot_id")
     return None
-
-async def get_message_by_stream_id(stream_id: str, user_id: str, token: str):
-    """Get a specific message by stream_id, verifying user ownership."""
-    log.info("get_message_by_stream_id - Starting lookup - stream_id: %s, user_id: %s", stream_id, user_id)
-    
-    params = {
-        "stream_id": f"eq.{stream_id}",
-        "user_id": f"eq.{user_id}",
-        "limit": 1
-    }
-    
-    log.debug("get_message_by_stream_id - REST API parameters (SQL equivalent: SELECT * FROM messages WHERE stream_id = %s AND user_id = %s LIMIT 1): %s", 
-              stream_id, user_id, params)
-    
-    try:
-        data = await _rest_get("messages", params, token)
-        
-        if not data:
-            log.warning("get_message_by_stream_id - No message found - stream_id: %s, user_id: %s", stream_id, user_id)
-            log.debug("get_message_by_stream_id - Supabase returned empty result set")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found or unauthorized")
-        
-        log.info("get_message_by_stream_id - Message found successfully - id: %s", data[0].get("id"))
-        log.debug("get_message_by_stream_id - Full message data: %s", data[0])
-        return data[0]
-        
-    except HTTPException as e:
-        log.error("get_message_by_stream_id - HTTPException during message lookup - status_code: %s, detail: %s", 
-                  e.status_code, e.detail)
-        log.debug("get_message_by_stream_id - Full HTTPException: %s", e)
-        raise
-    except Exception as e:
-        log.error("get_message_by_stream_id - Unexpected error during message lookup - error: %s, type: %s", 
-                  e, type(e).__name__)
-        log.debug("get_message_by_stream_id - Full exception details: %s", e)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")
-
-async def get_message(message_id: int, user_id: str, token: str):
-    """Get a specific message by ID, verifying user ownership."""
-    log.info("get_message - Starting lookup - message_id: %s, user_id: %s", message_id, user_id)
-    
-    params = {
-        "id": f"eq.{message_id}",
-        "user_id": f"eq.{user_id}",
-        "limit": 1
-    }
-    
-    log.debug("get_message - REST API parameters (SQL equivalent: SELECT * FROM messages WHERE id = %s AND user_id = %s LIMIT 1): %s", 
-              message_id, user_id, params)
-    
-    try:
-        data = await _rest_get("messages", params, token)
-        
-        if not data:
-            log.warning("get_message - No message found - message_id: %s, user_id: %s", message_id, user_id)
-            log.debug("get_message - Supabase returned empty result set")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Message not found or unauthorized")
-        
-        log.info("get_message - Message found successfully - id: %s", data[0].get("id"))
-        log.debug("get_message - Full message data: %s", data[0])
-        return data[0]
-        
-    except HTTPException as e:
-        log.error("get_message - HTTPException during message lookup - status_code: %s, detail: %s", 
-                  e.status_code, e.detail)
-        log.debug("get_message - Full HTTPException: %s", e)
-        raise
-    except Exception as e:
-        log.error("get_message - Unexpected error during message lookup - error: %s, type: %s", 
-                  e, type(e).__name__)
-        log.debug("get_message - Full exception details: %s", e)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")
 
 
 async def get_creator_session(creator_session_id: int, user_id: str, token: str):

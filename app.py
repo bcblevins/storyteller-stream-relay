@@ -34,13 +34,8 @@ from supabase import (
     get_workspace_conversation,
     get_workspace_conversation_bot,
     get_creator_session,
-    post_message,
     post_creator_message,
     post_workspace_conversation_message,
-    post_message_alternative,
-    get_message,
-    update_message_alternative,
-    get_message_by_stream_id,
     get_openrouter_demo_bot,
     create_demo_openrouter_bot,
 )
@@ -110,18 +105,6 @@ user_buckets: dict[str, dict] = {}
 OPENROUTER_BASE_URL = settings.OPENROUTER_BASE_URL
 
 
-async def safe_post(msg, token: str):
-    for attempt in range(3):
-        try:
-            return await post_message(msg, token)
-        except Exception as e:
-            if attempt == 2:
-                raise
-            log.warning(f"Retrying Supabase write ({attempt+1}/3): {e}")
-            await asyncio.sleep(1)
-    return None
-
-
 async def safe_post_creator_message(msg, token: str):
     for attempt in range(3):
         try:
@@ -142,19 +125,6 @@ async def safe_post_workspace_conversation_message(msg, token: str):
             if attempt == 2:
                 raise
             log.warning(f"Retrying workspace conversation message write ({attempt+1}/3): {e}")
-            await asyncio.sleep(1)
-    return None
-
-
-async def safe_post_alternative(alternative, token: str):
-    """Safe alternative message posting with retry logic"""
-    for attempt in range(3):
-        try:
-            return await post_message_alternative(alternative, token)
-        except Exception as e:
-            if attempt == 2:
-                raise
-            log.warning(f"Retrying alternative write ({attempt+1}/3): {e}")
             await asyncio.sleep(1)
     return None
 
@@ -597,19 +567,15 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         config=transform_config,
     )
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
-    is_alternative = mode == "conversation" and payload.get("is_alternative", False)
-    alternative_id = payload.get("alternative_id") if is_alternative else None
 
     log.info(
-        "Stream configuration - mode: %s, provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, is_alternative: %s, alternative_id: %s, completion_kwargs: %s",
+        "Stream configuration - mode: %s, provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
         mode,
         provider,
         model,
         temperature,
         max_tokens,
         stream_id,
-        is_alternative,
-        alternative_id,
         sorted(completion_kwargs.keys()),
     )
 
@@ -618,6 +584,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         ping_interval = 15
         last_ping = time.time()
         aborted = False
+        stream_failed = False
 
         try:
             async for chunk in openai_service.create_chat_completion_stream(
@@ -634,11 +601,12 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                     break
 
                 if chunk.get("error"):
+                    stream_failed = True
                     log.error("OpenAI streaming error: %s", chunk["error"])
-                    yield {"event": "error", "data": json.dumps({
-                        "error": chunk["error"],
-                        "stream_id": stream_id
-                    })}
+                    error_payload = {"error": chunk["error"]}
+                    if mode == "creator":
+                        error_payload["stream_id"] = stream_id
+                    yield {"event": "error", "data": json.dumps(error_payload)}
                     break
 
                 content_chunk = chunk.get("content")
@@ -653,26 +621,25 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                 if time.time() - last_ping > ping_interval:
                     yield {"event": "ping", "data": ""}
                     last_ping = time.time()
+        except Exception as e:
+            if mode != "conversation":
+                raise
+            stream_failed = True
+            log.error("OpenAI streaming exception: %s", e)
+            yield {"event": "error", "data": json.dumps({"error": str(e)})}
         finally:
             log.info("Stream complete - mode: %s, stream_id: %s, tokens: %d, aborted: %s", mode, stream_id, len(buffer), aborted)
 
             final_text = "".join(buffer)
 
+            if mode == "conversation":
+                if aborted or stream_failed:
+                    return
+                yield {"event": "done", "data": json.dumps({})}
+                return
+
             async def persist_and_build_done_payload():
                 done_payload = {"stream_id": stream_id}
-
-                if is_alternative and alternative_id:
-                    updates = {
-                        "content": final_text,
-                        "is_streaming": False,
-                        "is_complete": (not aborted),
-                        "stream_id": stream_id
-                    }
-                    log.debug("Updating alternative message - alternative_id: %s", alternative_id)
-                    await update_message_alternative(alternative_id, updates, auth_token)
-                    done_payload.update({"alternative_id": alternative_id})
-                    log.info("Alternative message updated - alternative_id: %s, stream_id: %s", alternative_id, stream_id)
-                    return done_payload
 
                 if mode == "creator":
                     assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
@@ -688,25 +655,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                         creator_turn_id=assistant_turn_id,
                     )
                     return done_payload
-                else:
-                    msg_record = {
-                        "user_id": user_id,
-                        "conversation_id": conversation_id,
-                        "content": final_text,
-                        "is_user_author": False,
-                        "is_streaming": False,
-                        "is_complete": (not aborted),
-                        "stream_id": stream_id,
-                    }
-                    if aborted:
-                        log.info("Stream aborted - stream_id: %s", stream_id)
-                    log.debug("Persisting message to Supabase - stream_id: %s", stream_id)
-                    persisted = await safe_post(msg_record, auth_token)
 
-                persisted_id = _extract_persisted_id(persisted)
-                if persisted_id:
-                    done_payload.update({"message_id": persisted_id})
-                log.info("Message persisted - mode: %s, stream_id: %s, message_id: %s", mode, stream_id, persisted_id)
                 return done_payload
 
             try:
@@ -824,27 +773,6 @@ async def auth_test(request: Request, bot_id: int):
     user_id, auth_token = await verify_jwt(request)
     bot = await get_bot(user_id, bot_id, auth_token)
     return {"user_id": user_id, "bot": bot["name"] if "name" in bot else bot["id"]}
-
-
-@app.get("/v1/message-by-stream-id")
-async def message_by_stream_id(request: Request, stream_id: str):
-    """
-    Lookup a persisted message by its stream_id.
-    Useful for clients that started streaming with a temporary ID and need
-    the real message id after persistence.
-    """
-    user_id, auth_token = await verify_jwt(request)
-    if not stream_id:
-        raise HTTPException(400, "stream_id is required")
-    try:
-        message = await get_message_by_stream_id(stream_id, user_id, auth_token)
-        return {"message": message}
-    except HTTPException as e:
-        # Pass through known errors (e.g., not found)
-        raise e
-    except Exception as e:
-        log.error("Failed to get message by stream_id: %s", e)
-        raise HTTPException(500, "Failed to get message by stream_id")
 
 
 @app.post("/v1/stream")
@@ -977,120 +905,3 @@ async def provision_openrouter_demo(request: Request):
         raise HTTPException(502, "Failed to create demo bot")
 
     return {"success": True, "bot_id": bot_id}
-
-
-@app.post("/v1/reroll")
-async def reroll_message(request: Request):
-    """
-    Create a new alternative message for reroll functionality.
-    Returns the new alternative message ID and stream ID for frontend streaming.
-    """
-    try:
-        payload = await request.json()
-        log.info("Reroll endpoint - Request received")
-    except Exception as e:
-        log.error("Reroll endpoint - Failed to parse JSON payload: %s", e)
-        raise HTTPException(400, "Invalid JSON")
-
-    user_id, auth_token = await verify_jwt(request)
-    
-    parent_message_id = payload.get("parent_message_id")
-    conversation_id = payload.get("conversation_id")
-    
-    log.info("Reroll endpoint - user_id: %s, parent_message_id: %s, conversation_id: %s", 
-             user_id, parent_message_id, conversation_id)
-    
-    # Validate required fields
-    if not parent_message_id:
-        log.error("Reroll endpoint - Missing required field: parent_message_id")
-        raise HTTPException(400, "parent_message_id is required")
-    if not conversation_id:
-        log.error("Reroll endpoint - Missing required field: conversation_id")
-        raise HTTPException(400, "conversation_id is required")
-    
-    # Check if this is a temporary message ID (from streaming)
-    # Convert to string for temporary ID check, but keep original type for database operations
-    is_temporary_id = str(parent_message_id).startswith('temp-')
-    actual_parent_message_id = parent_message_id
-    
-    # If it's a temporary ID, we need to find the actual message by stream_id
-    if is_temporary_id:
-        log.debug("Reroll endpoint - Temporary message ID detected: %s", parent_message_id)
-        # Extract stream_id from temporary message ID (format: temp-stream-{timestamp}-{random})
-        if str(parent_message_id).startswith('temp-stream-'):
-            # The temporary ID itself is the stream_id used during streaming
-            stream_id = parent_message_id
-            log.debug("Reroll endpoint - Looking up message by stream_id: %s", stream_id)
-            try:
-                parent_message = await get_message_by_stream_id(stream_id, user_id, auth_token)
-                actual_parent_message_id = parent_message['id']
-                log.debug("Reroll endpoint - Found actual message ID: %s for stream_id: %s", actual_parent_message_id, stream_id)
-            except HTTPException as e:
-                log.error("Reroll endpoint - Failed to find message by stream_id: %s, error: %s", stream_id, e.detail)
-                raise HTTPException(404, f"Temporary message not yet persisted. Please wait a moment and try again.")
-        else:
-            log.error("Reroll endpoint - Unsupported temporary message ID format: %s", parent_message_id)
-            raise HTTPException(400, "Unsupported temporary message ID format")
-    else:
-        # Normal message ID lookup
-        try:
-            log.debug("Reroll endpoint - Calling get_message with parent_message_id: %s, user_id: %s", parent_message_id, user_id)
-            parent_message = await get_message(parent_message_id, user_id, auth_token)
-            log.debug("Reroll endpoint - get_message result: %s", parent_message)
-        except HTTPException as e:
-            log.error("Reroll endpoint - get_message failed with HTTPException: %s, status_code: %s", e.detail, e.status_code)
-            raise HTTPException(404, "Parent message not found or unauthorized")
-        except Exception as e:
-            log.error("Reroll endpoint - get_message failed with unexpected error: %s", e)
-            raise HTTPException(500, f"Internal server error: {str(e)}")
-    
-    # Verify this is an AI message (only AI messages can be rerolled)
-    if parent_message.get("is_user_author"):
-        raise HTTPException(400, "Cannot reroll user messages")
-    
-    # Generate a unique stream ID
-    stream_id = f"reroll-{int(time.time() * 1000)}"
-    
-    # Create a new alternative message for streaming
-    alternative_record = {
-        "user_id": user_id,
-        "conversation_id": conversation_id,
-        "parent_message_id": actual_parent_message_id,
-        "content": "",  # Start with empty content for streaming
-        "is_user_author": False,  # AI messages
-        "is_streaming": True,
-        "is_complete": False,
-        "stream_id": stream_id,
-        "is_active": True
-    }
-    
-    try:
-        # Create the alternative message in Supabase
-        alternative_response = await safe_post_alternative(alternative_record, auth_token)
-        if not alternative_response:
-            raise HTTPException(500, "Failed to create alternative message after retries")
-        
-        alternative_message = alternative_response[0] if isinstance(alternative_response, list) else alternative_response
-        
-        log.info("Created alternative message - id: %s, parent_message_id: %s", alternative_message['id'], actual_parent_message_id)
-        
-        return {
-            "alternative_message": {
-                "id": alternative_message["id"],
-                "parent_message_id": actual_parent_message_id,
-                "conversation_id": conversation_id,
-                "content": "",
-                "is_user_author": False,
-                "is_streaming": True,
-                "is_complete": False,
-                "stream_id": stream_id,
-                "is_active": True
-            },
-            "stream_id": stream_id
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.error("Failed to create alternative message: %s", e)
-        raise HTTPException(500, f"Failed to create alternative message: {str(e)}")

@@ -1,17 +1,17 @@
 # Storyteller Relay
 
-The **Storyteller Relay** is a specialized backend service designed to handle real-time AI streaming, authentication, and state persistence for the Storyteller application.
+The **Storyteller Relay** is a specialized backend service designed to handle real-time AI streaming and authentication for the Storyteller application.
 
 It serves as the secure "switchboard" between the client frontend, the database (Supabase), and Large Language Model providers (OpenAI/DeepSeek), ensuring that sensitive API keys remain server-side while delivering low-latency token streaming to users.
 
 ## 🎯 Why This Exists
 
-Directly connecting a frontend to an LLM provider exposes API keys and lacks a robust way to persist generated content. This relay solves those problems by:
+Directly connecting a frontend to an LLM provider exposes API keys and duplicates provider-specific streaming logic. This relay solves those problems by:
 
 1.  **Securing Credentials:** It holds the LLM API keys, so the frontend never sees them.
 2.  **Centralizing Auth:** It verifies Supabase JWTs before processing any request.
-3.  **Persisting State:** It automatically saves AI-generated messages to the database immediately after streaming completes, ensuring the conversation history is always in sync.
-4.  **Handling "Rerolls":** It manages the logic for regenerating (rerolling) specific message nodes in the story tree without breaking the narrative flow.
+3.  **Relaying Tokens:** It streams model output to authenticated clients with low latency.
+4.  **Keeping Message Ownership Client-Side:** The frontend owns conversation message persistence, rerolls, alternatives, and cleanup.
 
 ## 🏗️ Architecture
 
@@ -23,7 +23,7 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
     * **Input:** Receives a user message context + system prompt + Supabase Auth Token.
     * **Process:** Authenticates the user, fetches the appropriate "Bot" configuration (model, temperature, system instructions) from Supabase, and opens a stream to the LLM provider.
     * **Output:** Streams tokens back to the client via Server-Sent Events (SSE).
-    * **Cleanup:** On stream completion (or interruption), it asynchronously saves the full message to Supabase.
+    * **Cleanup:** On completion it emits a terminal SSE event. The relay does not persist conversation messages or partial output.
 
 * **Bot Resolution Strategy:**
     The relay dynamically decides which AI persona to use for a response based on a priority hierarchy:
@@ -35,7 +35,7 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
 ### Key Features
 
 * **Server-Sent Events (SSE):** Uses `sse_starlette` for efficient, real-time text streaming.
-* **Smart Persistence:** Features retry logic ("safe post") to ensure messages are saved to the database even if the network hiccups.
+* **Frontend-Owned Conversation Persistence:** `/v1/stream` builds prompts from request-body `messages` and never reads or writes conversation message rows.
 * **Rate Limiting:** Includes basic in-memory rate limiting to prevent abuse.
 * **CORS Management:** specialized handling to support secure cross-origin requests from the Storyteller frontend.
 
