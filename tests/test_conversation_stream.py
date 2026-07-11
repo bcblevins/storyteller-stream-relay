@@ -26,6 +26,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         }
         request = request or _StreamRequest()
         forwarded = {}
+        completion_request = {}
 
         async def fake_stream(**kwargs):
             forwarded.update(kwargs)
@@ -33,6 +34,10 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
                 if isinstance(chunk, Exception):
                     raise chunk
                 yield chunk
+
+        def fake_build_completion_request_kwargs(**kwargs):
+            completion_request.update(kwargs)
+            return {}
 
         with (
             patch("app.verify_jwt", AsyncMock(return_value=("user-1", "token"))),
@@ -44,17 +49,17 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
             })),
             patch("app.openai_service.initialize_with_config", AsyncMock()),
             patch("app.openai_service.create_chat_completion_stream", fake_stream),
-            patch("app.build_completion_request_kwargs", return_value={}),
+            patch("app.build_completion_request_kwargs", side_effect=fake_build_completion_request_kwargs),
             patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
             patch("supabase._rest_post", AsyncMock()) as rest_post_mock,
         ):
             generator = await relay_app._stream_with_mode(request, payload, mode="conversation")
             events = [event async for event in generator]
 
-        return events, forwarded, rest_post_mock
+        return events, forwarded, rest_post_mock, completion_request
 
     async def test_success_streams_tokens_and_done_without_persistence_ids(self):
-        events, forwarded, rest_post_mock = await self._run_stream([
+        events, forwarded, rest_post_mock, _ = await self._run_stream([
             {"reasoning": "thinking"},
             {"content": "Once "},
             {"content": "upon a time"},
@@ -68,7 +73,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         rest_post_mock.assert_not_awaited()
 
     async def test_model_error_is_terminal_and_not_followed_by_done(self):
-        events, _, rest_post_mock = await self._run_stream([
+        events, _, rest_post_mock, _ = await self._run_stream([
             {"content": "Partial"},
             {"error": "provider failed"},
             {"content": "ignored"},
@@ -79,7 +84,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         rest_post_mock.assert_not_awaited()
 
     async def test_model_exception_is_terminal_error_not_done(self):
-        events, _, rest_post_mock = await self._run_stream([
+        events, _, rest_post_mock, _ = await self._run_stream([
             {"content": "Partial"},
             RuntimeError("provider exploded"),
         ])
@@ -89,7 +94,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         rest_post_mock.assert_not_awaited()
 
     async def test_disconnect_emits_nothing_and_writes_nothing(self):
-        events, _, rest_post_mock = await self._run_stream(
+        events, _, rest_post_mock, _ = await self._run_stream(
             [{"content": "Partial"}],
             request=_StreamRequest(disconnect_after_checks=1),
         )
@@ -106,7 +111,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
             "messages": [{"role": "user", "content": "Regenerate this."}],
         }
 
-        events, forwarded, rest_post_mock = await self._run_stream(
+        events, forwarded, rest_post_mock, _ = await self._run_stream(
             [{"content": "Replacement"}],
             payload=payload,
         )
@@ -115,3 +120,51 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(events[-1]["data"]), {})
         self.assertEqual(forwarded["messages"], payload["messages"])
         rest_post_mock.assert_not_awaited()
+
+    async def test_applies_system_injection_tag_before_streaming(self):
+        payload = {
+            "conversation_id": 123,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Base instructions. <injection>Use a concise answer.</injection>",
+                },
+                {"role": "user", "content": "Explain this."},
+            ],
+        }
+        config = relay_app.TransformConfig(enable_system_injection_tag=True)
+
+        with patch("app.build_transform_config", return_value=config):
+            events, forwarded, rest_post_mock, completion_request = await self._run_stream([
+                {"content": "Done"},
+            ], payload=payload)
+
+        self.assertEqual([event["event"] for event in events], ["token", "done"])
+        self.assertEqual(forwarded["messages"][0]["content"], "Base instructions.")
+        self.assertEqual(
+            forwarded["messages"][1]["content"],
+            "Explain this.\n\nUse a concise answer.",
+        )
+        self.assertEqual(completion_request["payload"]["messages"], forwarded["messages"])
+        rest_post_mock.assert_not_awaited()
+
+    async def test_passes_parsed_thinking_control_to_completion_builder(self):
+        payload = {
+            "conversation_id": 123,
+            "messages": [
+                {"role": "system", "content": "<thinking>disabled</thinking>"},
+                {"role": "user", "content": "Explain this."},
+            ],
+        }
+        config = relay_app.TransformConfig(enable_system_thinking_tag=True)
+
+        with patch("app.build_transform_config", return_value=config):
+            _, forwarded, _, completion_request = await self._run_stream([
+                {"content": "Done"},
+            ], payload=payload)
+
+        self.assertEqual(forwarded["messages"][0]["content"], "")
+        self.assertEqual(
+            completion_request["payload"]["_relay_thinking_control"],
+            {"enabled": False, "effort": None},
+        )

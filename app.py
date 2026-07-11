@@ -493,6 +493,19 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     if not isinstance(messages, list) or not messages:
         raise HTTPException(400, "messages is required and must be a non-empty array")
 
+    transform_config = build_transform_config()
+    completion_payload = payload
+    if mode == "conversation":
+        completion_payload = apply_system_injection_tag_transform(
+            payload=completion_payload,
+            config=transform_config,
+        )
+        completion_payload = apply_system_thinking_tag_transform(
+            payload=completion_payload,
+            config=transform_config,
+        )
+        messages = completion_payload["messages"]
+
     if mode == "creator":
         if not isinstance(creator_session_id, int):
             raise HTTPException(400, "creator_session_id is required")
@@ -554,14 +567,13 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         model = settings.OPENROUTER_DEMO_MODEL
     temperature = bot.get("temperature", 0.1)
     max_tokens = resolve_max_tokens(payload, bot)
-    transform_config = build_transform_config()
     provider = detect_completion_provider(
         base_url=base_url,
         model=model,
         is_openrouter=bool(bot.get("is_openrouter")),
     )
     completion_kwargs = build_completion_request_kwargs(
-        payload=payload,
+        payload=completion_payload,
         provider=provider,
         model=model,
         config=transform_config,

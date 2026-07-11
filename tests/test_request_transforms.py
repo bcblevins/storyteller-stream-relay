@@ -192,6 +192,26 @@ class RequestTransformsTest(unittest.TestCase):
         self.assertEqual(out["extra_body"]["metadata"]["source"], "test")
         self.assertEqual(out["extra_body"]["thinking"]["budget_tokens"], 1024)
 
+    def test_build_completion_request_kwargs_honors_parsed_thinking_control(self):
+        payload = {
+            "messages": [
+                {"role": "system", "content": "<thinking>disabled</thinking>"},
+                {"role": "user", "content": "hi"},
+            ]
+        }
+        config = TransformConfig(enable_system_thinking_tag=True)
+
+        transformed = apply_system_thinking_tag_transform(payload, config)
+        out = build_completion_request_kwargs(
+            transformed,
+            provider="openrouter",
+            model="example/model",
+            config=config,
+        )
+
+        self.assertEqual(out["extra_body"]["reasoning"]["enabled"], False)
+        self.assertEqual(out["extra_body"]["reasoning"]["effort"], "none")
+
     def test_extracts_injection_tag_from_system_and_appends_to_last_message(self):
         payload = {
             "messages": [

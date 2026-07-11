@@ -88,9 +88,9 @@ The addon endpoint requires:
 
 The same key is then used upstream with OpenRouter. If `GLM_PROXY_API_KEY` is not set, the endpoint returns `503` and remains unavailable.
 
-### Reasoning Injection
+### Reasoning and Prompt Controls
 
-The relay enables provider-specific thinking/reasoning defaults server-side and preserves explicit request settings unless override is enabled.
+The relay enables provider-specific thinking/reasoning defaults server-side and preserves explicit request settings unless override is enabled. These controls apply to the addon proxy and the main conversation stream (`POST /v1/stream`); creator streaming remains unchanged.
 
 OpenRouter requests get:
 
@@ -125,12 +125,12 @@ export ENABLE_SYSTEM_THINKING_TAG="true"
 export SYSTEM_THINKING_TAG_NAME="thinking"
 ```
 
-When `ENABLE_SYSTEM_INJECTION_TAG=true`, the proxy scans system messages for
+When `ENABLE_SYSTEM_INJECTION_TAG=true`, supported conversation requests scan system messages for
 `<injection>...</injection>` (or your configured tag), removes those blocks from
 system content, and appends the extracted text to the latest message before
-sending to OpenRouter.
+sending the provider request.
 
-When `ENABLE_SYSTEM_THINKING_TAG=true`, the proxy scans system messages for
+When `ENABLE_SYSTEM_THINKING_TAG=true`, supported conversation requests scan system messages for
 `<thinking>...</thinking>` (or your configured tag), removes those blocks from
 system content, and maps the extracted control to provider reasoning settings.
 Supported values are `enabled`, `disabled`, effort-only values like `high` or

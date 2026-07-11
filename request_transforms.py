@@ -21,8 +21,14 @@ class TransformConfig:
 
 
 _OPENAI_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
-_REASONING_REQUEST_FIELDS = ("reasoning", "reasoning_effort", "thinking", "extra_body")
 _THINKING_CONTROL_KEY = "_relay_thinking_control"
+_REASONING_REQUEST_FIELDS = (
+    "reasoning",
+    "reasoning_effort",
+    "thinking",
+    "extra_body",
+    _THINKING_CONTROL_KEY,
+)
 _THINKING_ENABLED_VALUES = {"enabled", "enable", "on", "true", "yes", "1"}
 _THINKING_DISABLED_VALUES = {"disabled", "disable", "off", "false", "no", "0", "none"}
 _THINKING_EFFORT_VALUES = {"minimal", "low", "medium", "high", "xhigh", "max"}
