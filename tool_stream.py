@@ -9,10 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openai_service import openai_service
 
-log = logging.getLogger("relay.creator")
+log = logging.getLogger("relay.tools")
 
 
-class CreatorStreamRequest(BaseModel):
+class ToolStreamRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
@@ -30,43 +30,12 @@ class CreatorStreamRequest(BaseModel):
         return self
 
 
-class CreatorToolCallInput(BaseModel):
+class ToolCallInput(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
     raw_arguments: str | None = None
 
-
-class CreatorContinuationRequest(CreatorStreamRequest):
-    mode: Literal["native_tools"] = "native_tools"
-    decision: Literal["approve", "reject", "retry"] | None = None
-    tool_call: CreatorToolCallInput | None = None
-    assistant_content: str | None = None
-    tool_result: Any | None = None
-    feedback: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_tool_call_payload(cls, data: Any):
-        if not isinstance(data, dict):
-            return data
-
-        if data.get("tool_call") is not None:
-            return data
-
-        tool_call_id = data.get("tool_call_id")
-        tool_name = data.get("tool_name")
-        if not tool_call_id or not tool_name:
-            return data
-
-        normalized = dict(data)
-        normalized["tool_call"] = {
-            "id": tool_call_id,
-            "name": tool_name,
-            "arguments": data.get("arguments") or {},
-            "raw_arguments": data.get("raw_arguments"),
-        }
-        return normalized
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
@@ -116,7 +85,7 @@ def _build_tool_call_event(message: dict[str, Any], stream_id: str, finish_reaso
         raw_arguments = function.get("arguments")
         arguments, raw_text = _tool_arguments_to_dict(raw_arguments)
         yield {
-            "event": "creator_tool_call",
+            "event": "tool_call",
             "data": {
                 "stream_id": stream_id,
                 "status": "awaiting_tool_approval",
@@ -147,7 +116,7 @@ def _tool_name_from_delta(tool_call_delta: dict[str, Any]) -> str | None:
 
 def _build_tool_call_start_event(tool_name: str | None) -> dict[str, Any]:
     return {
-        "event": "creator_tool_call_start",
+        "event": "tool_call_start",
         "data": {"tool_name": tool_name},
     }
 
@@ -183,8 +152,8 @@ def _final_tool_call_list(final_tool_calls: dict[int, dict[str, Any]]) -> list[d
     return [final_tool_calls[index] for index in sorted(final_tool_calls)]
 
 
-async def stream_creator_native_tool_turn(
-    request_payload: CreatorStreamRequest,
+async def stream_tool_turn(
+    request_payload: ToolStreamRequest,
     *,
     model: str,
     temperature: float,
@@ -192,7 +161,7 @@ async def stream_creator_native_tool_turn(
     bot: dict[str, Any],
     completion_kwargs: dict[str, Any] | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    stream_id = request_payload.stream_id or f"creator-stream-{int(time.time() * 1000)}"
+    stream_id = request_payload.stream_id or f"tool-stream-{int(time.time() * 1000)}"
     completion_kwargs = completion_kwargs or {}
     content_parts: list[str] = []
     final_tool_calls: dict[int, dict[str, Any]] = {}

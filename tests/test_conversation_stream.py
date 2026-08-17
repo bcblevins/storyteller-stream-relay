@@ -53,7 +53,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
             patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
             patch("supabase._rest_post", AsyncMock()) as rest_post_mock,
         ):
-            generator = await relay_app._stream_with_mode(request, payload, mode="conversation")
+            generator = await relay_app._stream_conversation(request, payload)
             events = [event async for event in generator]
 
         return events, forwarded, rest_post_mock, completion_request
@@ -212,7 +212,7 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
             patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
             patch("supabase._rest_post", AsyncMock()) as rest_post_mock,
         ):
-            tool_payload = relay_app.CreatorStreamRequest.model_validate(
+            tool_payload = relay_app.ToolStreamRequest.model_validate(
                 {**payload, "mode": "native_tools"}
             )
             generator = await relay_app._stream_conversation_tool_mode(request, payload, tool_payload)
@@ -248,10 +248,10 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
         ])
 
         event_names = [event["event"] for event in events]
-        self.assertIn("creator_tool_call_start", event_names)
-        self.assertIn("creator_tool_call", event_names)
+        self.assertIn("tool_call_start", event_names)
+        self.assertIn("tool_call", event_names)
 
-        tool_call = json.loads(events[event_names.index("creator_tool_call")]["data"])
+        tool_call = json.loads(events[event_names.index("tool_call")]["data"])
         self.assertEqual(tool_call["tool_name"], "search_world_entries")
         self.assertEqual(tool_call["arguments"], {"query": "reach"})
         rest_post_mock.assert_not_awaited()

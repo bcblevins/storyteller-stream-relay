@@ -10,10 +10,9 @@ import json, time, logging, asyncio, os
 import httpx
 import hmac
 
-from creator_stream import (
-    CreatorContinuationRequest,
-    CreatorStreamRequest,
-    stream_creator_native_tool_turn,
+from tool_stream import (
+    ToolStreamRequest,
+    stream_tool_turn,
 )
 from openai_service import openai_service
 from auth import verify_jwt
@@ -31,11 +30,7 @@ from supabase import (
     get_bot,
     get_default_bot,
     get_conversation_bot,
-    get_workspace_conversation,
     get_workspace_conversation_bot,
-    get_creator_session,
-    post_creator_message,
-    post_workspace_conversation_message,
     get_openrouter_demo_bot,
     create_demo_openrouter_bot,
 )
@@ -103,30 +98,6 @@ app.add_middleware(
 user_buckets: dict[str, dict] = {}
 
 OPENROUTER_BASE_URL = settings.OPENROUTER_BASE_URL
-
-
-async def safe_post_creator_message(msg, token: str):
-    for attempt in range(3):
-        try:
-            return await post_creator_message(msg, token)
-        except Exception as e:
-            if attempt == 2:
-                raise
-            log.warning(f"Retrying creator message write ({attempt+1}/3): {e}")
-            await asyncio.sleep(1)
-    return None
-
-
-async def safe_post_workspace_conversation_message(msg, token: str):
-    for attempt in range(3):
-        try:
-            return await post_workspace_conversation_message(msg, token)
-        except Exception as e:
-            if attempt == 2:
-                raise
-            log.warning(f"Retrying workspace conversation message write ({attempt+1}/3): {e}")
-            await asyncio.sleep(1)
-    return None
 
 
 def verify_proxy_api_key(request: Request) -> str:
@@ -246,242 +217,16 @@ def _extract_persisted_id(persisted):
     return None
 
 
-def _build_creator_assistant_message_record(
-    *,
-    user_id: str,
-    creator_session_id: int | None,
-    content: str,
-    stream_id: str,
-    is_complete: bool,
-    creator_turn_id: str | None = None,
-) -> dict:
-    msg_record = {
-        "user_id": user_id,
-        "creator_session_id": creator_session_id,
-        "content": content,
-        "is_user_author": False,
-        "is_streaming": False,
-        "is_complete": is_complete,
-        "stream_id": stream_id,
-    }
-    if creator_turn_id:
-        msg_record["creator_turn_id"] = creator_turn_id
-    return msg_record
-
-
-def _build_workspace_conversation_assistant_message_record(
-    *,
-    conversation_id: int,
-    content: str,
-    stream_id: str,
-    is_complete: bool,
-    creator_turn_id: str | None = None,
-) -> dict:
-    msg_record = {
-        "conversation_id": conversation_id,
-        "role": "assistant",
-        "content": content,
-        "status": "complete" if is_complete else "aborted",
-        "stream_id": stream_id,
-    }
-    if creator_turn_id:
-        msg_record["turn_id"] = creator_turn_id
-    return msg_record
-
-
-async def _persist_creator_assistant_message_for_done(
-    done_payload: dict,
-    *,
-    user_id: str,
-    creator_session_id: int | None,
-    workspace_conversation: dict | None = None,
-    content: str,
-    stream_id: str,
-    auth_token: str,
-    creator_turn_id: str | None = None,
-    is_complete: bool = True,
-) -> dict:
-    if not content.strip():
-        return done_payload
-
-    if workspace_conversation is not None:
-        msg_record = _build_workspace_conversation_assistant_message_record(
-            conversation_id=workspace_conversation.get("id"),
-            content=content,
-            is_complete=is_complete,
-            stream_id=stream_id,
-            creator_turn_id=creator_turn_id,
-        )
-        log.debug("Persisting workspace creator message to Supabase - stream_id: %s", stream_id)
-        persisted = await safe_post_workspace_conversation_message(msg_record, auth_token)
-    else:
-        msg_record = _build_creator_assistant_message_record(
-            user_id=user_id,
-            creator_session_id=creator_session_id,
-            content=content,
-            is_complete=is_complete,
-            stream_id=stream_id,
-            creator_turn_id=creator_turn_id,
-        )
-        log.debug("Persisting legacy creator message to Supabase - stream_id: %s", stream_id)
-        persisted = await safe_post_creator_message(msg_record, auth_token)
-    persisted_id = _extract_persisted_id(persisted)
-    if persisted_id:
-        done_payload["message_id"] = persisted_id
-    log.info(
-        "Native tool creator message persisted - stream_id: %s, message_id: %s",
-        stream_id,
-        persisted_id,
-    )
-    return done_payload
-
-
 def _serialize_sse_data(data):
     if isinstance(data, (dict, list)):
         return json.dumps(data)
     return data if data is not None else ""
 
 
-async def _stream_creator_native_tool_mode(
-    request: Request,
-    payload: dict,
-    native_payload: CreatorStreamRequest,
-):
-    user_id, auth_token = await verify_jwt(request)
-    desired_bot_id = payload.get("bot_id")
-    creator_session_id = native_payload.creator_session_id
-    messages = native_payload.messages
-
-    if not isinstance(messages, list) or not messages:
-        raise HTTPException(400, "messages is required and must be a non-empty array")
-    if not isinstance(creator_session_id, int):
-        raise HTTPException(400, "creator_session_id is required")
-
-    workspace_conversation = await get_workspace_conversation(creator_session_id, user_id, auth_token)
-    if workspace_conversation is not None:
-        creator_session_kind = "workspace_conversation"
-    else:
-        creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
-        creator_session_kind = creator_session.get("entity_type")
-    log.info(
-        "Creator native tool request - User: %s, creator_session_id: %s, workspace_conversation_id: %s, creator_session_kind: %s, messages_count: %d",
-        user_id,
-        creator_session_id,
-        workspace_conversation.get("id") if workspace_conversation else None,
-        creator_session_kind,
-        len(messages),
-    )
-
-    bot = await resolve_stream_bot(
-        user_id=user_id,
-        auth_token=auth_token,
-        desired_bot_id=desired_bot_id,
-        conversation_id=None,
-        workspace_conversation=workspace_conversation,
-    )
-    log.debug("Selected native tool bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
-
-    api_key = bot.get("access_key")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        api_key = bot.get("openrouter_key")
-    base_url = normalize_completion_base_url(bot.get("access_path"))
-
-    try:
-        await openai_service.initialize_with_config(
-            api_key=api_key,
-            base_url=base_url
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
-
-    model = bot.get("model", "deepseek-chat")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        model = settings.OPENROUTER_DEMO_MODEL
-    temperature = bot.get("temperature", 0.1)
-    max_tokens = resolve_max_tokens(payload, bot)
-    transform_config = build_transform_config()
-    provider = detect_completion_provider(
-        base_url=base_url,
-        model=model,
-        is_openrouter=bool(bot.get("is_openrouter")),
-    )
-    completion_kwargs = build_completion_request_kwargs(
-        payload=payload,
-        provider=provider,
-        model=model,
-        config=transform_config,
-    )
-    stream_id = native_payload.stream_id or f"creator-tool-{int(time.time() * 1000)}"
-    stream_payload = native_payload.model_copy(update={"stream_id": stream_id})
-    assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
-
-    log.info(
-        "Creator native tool configuration - provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
-        provider,
-        model,
-        temperature,
-        max_tokens,
-        stream_id,
-        sorted(completion_kwargs.keys()),
-    )
-
-    async def event_gen():
-        buffered_content: list[str] = []
-        async for event in stream_creator_native_tool_turn(
-            stream_payload,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            bot=bot,
-            completion_kwargs=completion_kwargs,
-        ):
-            if await request.is_disconnected():
-                log.info(
-                    "Creator client disconnected during native tool turn - creator_session_id: %s, stream_id: %s",
-                    creator_session_id,
-                    stream_id,
-                )
-                break
-
-            if event["event"] == "token" and isinstance(event["data"], str):
-                buffered_content.append(event["data"])
-
-            if event["event"] == "done" and isinstance(event["data"], dict):
-                done_payload = dict(event["data"])
-                if done_payload.get("status") in {"completed", "awaiting_tool_approval"}:
-                    final_text = "".join(buffered_content)
-
-                    async def persist_and_build_done_payload():
-                        return await _persist_creator_assistant_message_for_done(
-                            done_payload,
-                            user_id=user_id,
-                            creator_session_id=creator_session_id,
-                            workspace_conversation=workspace_conversation,
-                            content=final_text,
-                            stream_id=stream_id,
-                            auth_token=auth_token,
-                            creator_turn_id=assistant_turn_id,
-                        )
-
-                    try:
-                        done_payload = await asyncio.shield(persist_and_build_done_payload())
-                    except asyncio.CancelledError:
-                        log.warning("Native tool persistence shield cancelled - stream_id: %s", stream_id)
-                        done_payload["error"] = "persist_cancelled"
-                    except Exception as e:
-                        log.error("Failed to persist native tool creator message - stream_id: %s, error: %s", stream_id, e)
-                        done_payload["error"] = "persist_failed"
-                event = {"event": event["event"], "data": done_payload}
-
-            yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
-
-    return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
-
-
 async def _stream_conversation_tool_mode(
     request: Request,
     payload: dict,
-    tool_payload: CreatorStreamRequest,
+    tool_payload: ToolStreamRequest,
 ):
     """Stream a conversation turn that carries tools.
 
@@ -541,7 +286,7 @@ async def _stream_conversation_tool_mode(
         model=model,
         config=transform_config,
     )
-    stream_id = tool_payload.stream_id or f"conversation-tool-{int(time.time() * 1000)}"
+    stream_id = tool_payload.stream_id or f"tool-{int(time.time() * 1000)}"
     stream_payload = tool_payload.model_copy(update={"stream_id": stream_id})
 
     log.info(
@@ -553,7 +298,7 @@ async def _stream_conversation_tool_mode(
     )
 
     async def event_gen():
-        async for event in stream_creator_native_tool_turn(
+        async for event in stream_tool_turn(
             stream_payload,
             model=model,
             temperature=temperature,
@@ -573,72 +318,44 @@ async def _stream_conversation_tool_mode(
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
 
-async def _stream_with_mode(request: Request, payload: dict, mode: str):
-    if mode not in {"conversation", "creator"}:
-        raise HTTPException(500, "Invalid stream mode")
+async def _stream_conversation(request: Request, payload: dict):
+    """Stream a plain conversation turn.
 
+    Stateless by construction: it resolves a bot, streams tokens, and writes
+    nothing. The app owns every message it keeps.
+    """
     user_id, auth_token = await verify_jwt(request)
     desired_bot_id = payload.get("bot_id")
-    conversation_id = payload.get("conversation_id") if mode == "conversation" else None
-    creator_session_id = payload.get("creator_session_id") if mode == "creator" else None
-    workspace_conversation = None
-    creator_session = None
+    conversation_id = payload.get("conversation_id")
     messages = payload.get("messages", [])
 
     if not isinstance(messages, list) or not messages:
         raise HTTPException(400, "messages is required and must be a non-empty array")
 
     transform_config = build_transform_config()
-    completion_payload = payload
-    if mode == "conversation":
-        completion_payload = apply_system_injection_tag_transform(
-            payload=completion_payload,
-            config=transform_config,
-        )
-        completion_payload = apply_system_thinking_tag_transform(
-            payload=completion_payload,
-            config=transform_config,
-        )
-        messages = completion_payload["messages"]
+    completion_payload = apply_system_injection_tag_transform(
+        payload=payload,
+        config=transform_config,
+    )
+    completion_payload = apply_system_thinking_tag_transform(
+        payload=completion_payload,
+        config=transform_config,
+    )
+    messages = completion_payload["messages"]
 
-    if mode == "creator":
-        if not isinstance(creator_session_id, int):
-            raise HTTPException(400, "creator_session_id is required")
-        workspace_conversation = await get_workspace_conversation(creator_session_id, user_id, auth_token)
-        if workspace_conversation is not None:
-            creator_session_kind = "workspace_conversation"
-        else:
-            creator_session = await get_creator_session(creator_session_id, user_id, auth_token)
-            creator_session_kind = creator_session.get("entity_type")
-        log.info(
-            "Creator stream request - User: %s, creator_session_id: %s, workspace_conversation_id: %s, creator_session_kind: %s, messages_count: %d",
-            user_id,
-            creator_session_id,
-            workspace_conversation.get("id") if workspace_conversation else None,
-            creator_session_kind,
-            len(messages),
-        )
-    else:
-        log.info(
-            "Stream request - User: %s, conversation_id: %s, messages_count: %d",
-            user_id,
-            conversation_id,
-            len(messages),
-        )
-
-    log.debug(
-        "Bot resolution - desired_bot_id: %s, conversation_id: %s, creator_session_id: %s, messages_count: %d",
-        desired_bot_id,
+    log.info(
+        "Stream request - User: %s, conversation_id: %s, messages_count: %d",
+        user_id,
         conversation_id,
-        creator_session_id,
         len(messages),
     )
+
     bot = await resolve_stream_bot(
         user_id=user_id,
         auth_token=auth_token,
         desired_bot_id=desired_bot_id,
         conversation_id=conversation_id,
-        workspace_conversation=workspace_conversation,
+        workspace_conversation=None,
     )
     log.debug("Selected bot - id: %s, name: %s, model: %s", bot.get("id"), bot.get("name"), bot.get("model"))
 
@@ -654,8 +371,6 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
         )
     except Exception as e:
         raise HTTPException(500, f"Failed to init OpenAI client: {e}")
-
-    log.debug("Messages to send to OpenAI: %s", messages)
 
     model = bot.get("model", "deepseek-chat")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
@@ -676,8 +391,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
 
     log.info(
-        "Stream configuration - mode: %s, provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
-        mode,
+        "Stream configuration - provider: %s, model: %s, temperature: %s, max_tokens: %s, stream_id: %s, completion_kwargs: %s",
         provider,
         model,
         temperature,
@@ -710,10 +424,7 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                 if chunk.get("error"):
                     stream_failed = True
                     log.error("OpenAI streaming error: %s", chunk["error"])
-                    error_payload = {"error": chunk["error"]}
-                    if mode == "creator":
-                        error_payload["stream_id"] = stream_id
-                    yield {"event": "error", "data": json.dumps(error_payload)}
+                    yield {"event": "error", "data": json.dumps({"error": chunk["error"]})}
                     break
 
                 content_chunk = chunk.get("content")
@@ -729,54 +440,19 @@ async def _stream_with_mode(request: Request, payload: dict, mode: str):
                     yield {"event": "ping", "data": ""}
                     last_ping = time.time()
         except Exception as e:
-            if mode != "conversation":
-                raise
             stream_failed = True
             log.error("OpenAI streaming exception: %s", e)
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
         finally:
-            log.info("Stream complete - mode: %s, stream_id: %s, tokens: %d, aborted: %s", mode, stream_id, len(buffer), aborted)
+            log.info("Stream complete - stream_id: %s, tokens: %d, aborted: %s", stream_id, len(buffer), aborted)
 
-            final_text = "".join(buffer)
-
-            if mode == "conversation":
-                if aborted or stream_failed:
-                    return
+            # Exactly one terminal event: an error already ended the stream, and
+            # a disconnected client gets nothing.
+            if not aborted and not stream_failed:
                 yield {"event": "done", "data": json.dumps({})}
-                return
-
-            async def persist_and_build_done_payload():
-                done_payload = {"stream_id": stream_id}
-
-                if mode == "creator":
-                    assistant_turn_id = payload.get("assistant_turn_id") if isinstance(payload.get("assistant_turn_id"), str) else None
-                    done_payload = await _persist_creator_assistant_message_for_done(
-                        done_payload,
-                        user_id=user_id,
-                        creator_session_id=creator_session_id,
-                        workspace_conversation=workspace_conversation,
-                        content=final_text,
-                        is_complete=(not aborted),
-                        stream_id=stream_id,
-                        auth_token=auth_token,
-                        creator_turn_id=assistant_turn_id,
-                    )
-                    return done_payload
-
-                return done_payload
-
-            try:
-                done_payload = await asyncio.shield(persist_and_build_done_payload())
-            except asyncio.CancelledError:
-                log.warning("Persistence shield cancelled - stream_id: %s", stream_id)
-                done_payload = {"stream_id": stream_id, "error": "persist_cancelled"}
-            except Exception as e:
-                log.error("Failed to persist message - mode: %s, stream_id: %s, error: %s", mode, stream_id, e)
-                done_payload = {"stream_id": stream_id, "error": "persist_failed"}
-
-            yield {"event": "done", "data": json.dumps(done_payload)}
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
+
 
 # --- Health endpoint ---
 @app.get("/healthz")
@@ -901,72 +577,13 @@ async def stream(request: Request):
     # takes the plain token path.
     if payload.get("tools"):
         try:
-            tool_payload = CreatorStreamRequest.model_validate({**payload, "mode": "native_tools"})
+            tool_payload = ToolStreamRequest.model_validate({**payload, "mode": "native_tools"})
         except ValidationError as e:
             raise HTTPException(400, {"error": "Invalid tool stream request", "details": e.errors()})
         return await _stream_conversation_tool_mode(request, payload, tool_payload)
 
-    return await _stream_with_mode(request, payload, mode="conversation")
+    return await _stream_conversation(request, payload)
 
-
-@app.post("/v1/creator/stream")
-async def creator_stream(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON")
-
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "JSON body must be an object")
-
-    if payload.get("mode") == "native_tools":
-        try:
-            native_payload = CreatorStreamRequest.model_validate(payload)
-        except ValidationError as e:
-            raise HTTPException(400, {"error": "Invalid creator native tool request", "details": e.errors()})
-        return await _stream_creator_native_tool_mode(request, payload, native_payload)
-
-    return await _stream_with_mode(request, payload, mode="creator")
-
-
-@app.post("/v1/creator/stream/continue")
-async def creator_stream_continue(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "Invalid JSON")
-
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "JSON body must be an object")
-
-    tool_call_payload = payload.get("tool_call")
-    has_nested_tool_call = isinstance(tool_call_payload, dict)
-    has_flat_tool_call = bool(payload.get("tool_call_id") and payload.get("tool_name"))
-    log.info(
-        "Creator continuation request - stream_id: %s, decision: %s, has_nested_tool_call: %s, has_flat_tool_call: %s, tool_call_id: %s, tool_name: %s",
-        payload.get("stream_id"),
-        payload.get("decision"),
-        has_nested_tool_call,
-        has_flat_tool_call,
-        tool_call_payload.get("id") if has_nested_tool_call else payload.get("tool_call_id"),
-        tool_call_payload.get("name") if has_nested_tool_call else payload.get("tool_name"),
-    )
-
-    try:
-        continuation_payload = CreatorContinuationRequest.model_validate(payload)
-    except ValidationError as e:
-        log.warning(
-            "Invalid creator continuation request - stream_id: %s, decision: %s, has_nested_tool_call: %s, has_flat_tool_call: %s, validation_errors: %s",
-            payload.get("stream_id"),
-            payload.get("decision"),
-            has_nested_tool_call,
-            has_flat_tool_call,
-            e.errors(),
-        )
-        raise HTTPException(400, {"error": "Invalid creator continuation request", "details": e.errors()})
-
-    next_payload_dict = continuation_payload.model_dump(exclude_none=True)
-    return await _stream_creator_native_tool_mode(request, next_payload_dict, continuation_payload)
 
 async def _provision_openrouter_key(user_id: str) -> str:
     payload = {

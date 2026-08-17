@@ -108,51 +108,6 @@ async def get_conversation_bot(user_id: str, conversation_id: int, token: str):
     log.info("Conversation bot found - bot_id: %s", bot_id)
     return await get_bot(user_id, bot_id, token)
 
-async def get_workspace_conversation(creator_session_id: int, user_id: str, token: str):
-    """
-    Resolve the current creator-session compat id to a workspace conversation.
-
-    New creator sessions are backed by workspace_conversations.id. Legacy
-    creator sessions were backfilled with workspace_conversations.legacy_creator_session_id.
-    """
-    log.info(
-        "Getting workspace conversation - creator_session_id: %s, user_id: %s",
-        creator_session_id,
-        user_id,
-    )
-
-    params = {
-        "id": f"eq.{creator_session_id}",
-        "select": "id,workspace_id,bot_id,status,legacy_creator_session_id",
-        "limit": 1,
-    }
-    data = await _rest_get("workspace_conversations", params, token)
-    if data:
-        log.info("Workspace conversation found by id - id: %s", data[0].get("id"))
-        return data[0]
-
-    params = {
-        "legacy_creator_session_id": f"eq.{creator_session_id}",
-        "select": "id,workspace_id,bot_id,status,legacy_creator_session_id",
-        "order": "updated_at.desc,id.desc",
-        "limit": 1,
-    }
-    data = await _rest_get("workspace_conversations", params, token)
-    if data:
-        log.info(
-            "Workspace conversation found by legacy_creator_session_id - id: %s, legacy_creator_session_id: %s",
-            data[0].get("id"),
-            creator_session_id,
-        )
-        return data[0]
-
-    log.info(
-        "No workspace conversation found - creator_session_id: %s, user_id: %s",
-        creator_session_id,
-        user_id,
-    )
-    return None
-
 async def get_workspace_conversation_bot(user_id: str, conversation: dict, token: str):
     """Fetch the bot selected for a workspace conversation, if one is configured."""
     bot_id = conversation.get("bot_id") if conversation else None
@@ -203,16 +158,6 @@ async def _rest_rpc(function_name: str, data: dict, token: str):
     log.info("Supabase RPC successful")
     return resp.json()
 
-async def post_creator_message(message: dict, token: str):
-    """Write a creator message record to Supabase REST endpoint."""
-    return await _rest_post("creator_messages", message, token)
-
-
-async def post_workspace_conversation_message(message: dict, token: str):
-    """Write a workspace conversation message record to Supabase REST endpoint."""
-    return await _rest_post("conversation_messages", message, token)
-
-
 async def get_openrouter_demo_bot(user_id: str, token: str):
     """Get existing OpenRouter demo bot for a user, if any."""
     log.info("Getting OpenRouter demo bot - user_id: %s", user_id)
@@ -249,59 +194,3 @@ async def create_demo_openrouter_bot(
     return None
 
 
-async def get_creator_session(creator_session_id: int, user_id: str, token: str):
-    """Get a specific creator session by ID, verifying user ownership."""
-    log.info(
-        "get_creator_session - Starting lookup - creator_session_id: %s, user_id: %s",
-        creator_session_id,
-        user_id,
-    )
-
-    params = {
-        "id": f"eq.{creator_session_id}",
-        "user_id": f"eq.{user_id}",
-        "limit": 1,
-    }
-
-    log.debug(
-        "get_creator_session - REST API parameters (SQL equivalent: SELECT * FROM creator_sessions WHERE id = %s AND user_id = %s LIMIT 1): %s",
-        creator_session_id,
-        user_id,
-        params,
-    )
-
-    try:
-        data = await _rest_get("creator_sessions", params, token)
-
-        if not data:
-            log.warning(
-                "get_creator_session - No creator session found - creator_session_id: %s, user_id: %s",
-                creator_session_id,
-                user_id,
-            )
-            log.debug("get_creator_session - Supabase returned empty result set")
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Creator session not found or unauthorized")
-
-        log.info(
-            "get_creator_session - Creator session found successfully - id: %s",
-            data[0].get("id"),
-        )
-        log.debug("get_creator_session - Full creator session data: %s", data[0])
-        return data[0]
-
-    except HTTPException as e:
-        log.error(
-            "get_creator_session - HTTPException during creator session lookup - status_code: %s, detail: %s",
-            e.status_code,
-            e.detail,
-        )
-        log.debug("get_creator_session - Full HTTPException: %s", e)
-        raise
-    except Exception as e:
-        log.error(
-            "get_creator_session - Unexpected error during creator session lookup - error: %s, type: %s",
-            e,
-            type(e).__name__,
-        )
-        log.debug("get_creator_session - Full exception details: %s", e)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Internal server error: {str(e)}")
