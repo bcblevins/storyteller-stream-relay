@@ -168,3 +168,98 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
             completion_request["payload"]["_relay_thinking_control"],
             {"enabled": False, "effort": None},
         )
+
+
+class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
+    """Tools on the conversation route.
+
+    Tools are a capability of a generation request, not a property of the
+    Creator surface. This path must behave exactly like the plain conversation
+    stream in the one way that matters most: it writes nothing.
+    """
+
+    async def _run_tool_stream(self, chunks, *, payload=None, request=None):
+        payload = payload or {
+            "conversation_id": 123,
+            "messages": [{"role": "user", "content": "Who rules here?"}],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "search_world_entries", "parameters": {"type": "object"}},
+            }],
+            "tool_choice": "auto",
+        }
+        request = request or _StreamRequest()
+        forwarded = {}
+
+        async def fake_tool_stream(**kwargs):
+            forwarded.update(kwargs)
+            for chunk in chunks:
+                if isinstance(chunk, Exception):
+                    raise chunk
+                yield chunk
+
+        with (
+            patch("app.verify_jwt", AsyncMock(return_value=("user-1", "token"))),
+            patch("app.resolve_stream_bot", AsyncMock(return_value={
+                "id": 9,
+                "access_key": "key",
+                "model": "model",
+                "temperature": 0.2,
+            })),
+            patch("app.openai_service.initialize_with_config", AsyncMock()),
+            patch("app.openai_service.create_chat_completion_tool_stream", fake_tool_stream),
+            patch("app.build_completion_request_kwargs", side_effect=lambda **kwargs: {}),
+            patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
+            patch("supabase._rest_post", AsyncMock()) as rest_post_mock,
+        ):
+            tool_payload = relay_app.CreatorStreamRequest.model_validate(
+                {**payload, "mode": "native_tools"}
+            )
+            generator = await relay_app._stream_conversation_tool_mode(request, payload, tool_payload)
+            events = [event async for event in generator]
+
+        return events, forwarded, rest_post_mock
+
+    async def test_forwards_tools_to_the_provider(self):
+        _, forwarded, _ = await self._run_tool_stream([{"content": "Thinking."}])
+
+        self.assertEqual(forwarded["tools"][0]["function"]["name"], "search_world_entries")
+        self.assertEqual(forwarded["tool_choice"], "auto")
+        self.assertEqual(forwarded["messages"], [{"role": "user", "content": "Who rules here?"}])
+
+    async def test_streams_tokens_and_persists_nothing(self):
+        events, _, rest_post_mock = await self._run_tool_stream([
+            {"content": "The Compact "},
+            {"content": "rules it."},
+        ])
+
+        self.assertEqual([event["event"] for event in events], ["token", "token", "done"])
+        self.assertEqual(events[0]["data"], "The Compact ")
+        rest_post_mock.assert_not_awaited()
+
+    async def test_emits_tool_call_events(self):
+        events, _, rest_post_mock = await self._run_tool_stream([
+            {"tool_calls": [{
+                "index": 0,
+                "id": "call-1",
+                "function": {"name": "search_world_entries", "arguments": '{"query":"reach"}'},
+            }]},
+            {"finish_reason": "tool_calls"},
+        ])
+
+        event_names = [event["event"] for event in events]
+        self.assertIn("creator_tool_call_start", event_names)
+        self.assertIn("creator_tool_call", event_names)
+
+        tool_call = json.loads(events[event_names.index("creator_tool_call")]["data"])
+        self.assertEqual(tool_call["tool_name"], "search_world_entries")
+        self.assertEqual(tool_call["arguments"], {"query": "reach"})
+        rest_post_mock.assert_not_awaited()
+
+    async def test_requires_messages(self):
+        with self.assertRaises(Exception):
+            await self._run_tool_stream([], payload={
+                "conversation_id": 123,
+                "messages": [],
+                "tools": [{"type": "function", "function": {"name": "x"}}],
+            })

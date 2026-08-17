@@ -478,6 +478,101 @@ async def _stream_creator_native_tool_mode(
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
 
+async def _stream_conversation_tool_mode(
+    request: Request,
+    payload: dict,
+    tool_payload: CreatorStreamRequest,
+):
+    """Stream a conversation turn that carries tools.
+
+    Tools are a capability of a generation request, not a property of the
+    Creator surface, so the conversation endpoint serves them too. This path is
+    entirely stateless: it resolves a bot, streams, and writes nothing. Message
+    persistence belongs to the app.
+    """
+    user_id, auth_token = await verify_jwt(request)
+    desired_bot_id = payload.get("bot_id")
+    conversation_id = payload.get("conversation_id")
+    messages = tool_payload.messages
+
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(400, "messages is required and must be a non-empty array")
+
+    log.info(
+        "Conversation tool request - User: %s, conversation_id: %s, messages_count: %d, tools: %d",
+        user_id,
+        conversation_id,
+        len(messages),
+        len(tool_payload.tools),
+    )
+
+    bot = await resolve_stream_bot(
+        user_id=user_id,
+        auth_token=auth_token,
+        desired_bot_id=desired_bot_id,
+        conversation_id=conversation_id,
+        workspace_conversation=None,
+    )
+
+    api_key = bot.get("access_key")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        api_key = bot.get("openrouter_key")
+    base_url = normalize_completion_base_url(bot.get("access_path"))
+
+    try:
+        await openai_service.initialize_with_config(api_key=api_key, base_url=base_url)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
+
+    model = bot.get("model", "deepseek-chat")
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        model = settings.OPENROUTER_DEMO_MODEL
+    temperature = bot.get("temperature", 0.1)
+    max_tokens = resolve_max_tokens(payload, bot)
+    transform_config = build_transform_config()
+    provider = detect_completion_provider(
+        base_url=base_url,
+        model=model,
+        is_openrouter=bool(bot.get("is_openrouter")),
+    )
+    completion_kwargs = build_completion_request_kwargs(
+        payload=payload,
+        provider=provider,
+        model=model,
+        config=transform_config,
+    )
+    stream_id = tool_payload.stream_id or f"conversation-tool-{int(time.time() * 1000)}"
+    stream_payload = tool_payload.model_copy(update={"stream_id": stream_id})
+
+    log.info(
+        "Conversation tool configuration - provider: %s, model: %s, max_tokens: %s, stream_id: %s",
+        provider,
+        model,
+        max_tokens,
+        stream_id,
+    )
+
+    async def event_gen():
+        async for event in stream_creator_native_tool_turn(
+            stream_payload,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            bot=bot,
+            completion_kwargs=completion_kwargs,
+        ):
+            if await request.is_disconnected():
+                log.info(
+                    "Client disconnected during conversation tool turn - stream_id: %s",
+                    stream_id,
+                )
+                break
+
+            yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
+
+    return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
+
+
 async def _stream_with_mode(request: Request, payload: dict, mode: str):
     if mode not in {"conversation", "creator"}:
         raise HTTPException(500, "Invalid stream mode")
@@ -798,6 +893,19 @@ async def stream(request: Request):
         payload = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "JSON body must be an object")
+
+    # A request that carries tools needs the tool-aware stream; everything else
+    # takes the plain token path.
+    if payload.get("tools"):
+        try:
+            tool_payload = CreatorStreamRequest.model_validate({**payload, "mode": "native_tools"})
+        except ValidationError as e:
+            raise HTTPException(400, {"error": "Invalid tool stream request", "details": e.errors()})
+        return await _stream_conversation_tool_mode(request, payload, tool_payload)
+
     return await _stream_with_mode(request, payload, mode="conversation")
 
 

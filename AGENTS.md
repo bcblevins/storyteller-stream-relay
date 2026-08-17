@@ -18,13 +18,13 @@
 - `GET /healthz`: health check.
 - `GET /auth/test`: validate auth + bot access.
 - `POST /v1/chat/completions`: **external-consumer** OpenAI-compatible passthrough (proxy API key auth, not Storyteller JWT). Not part of the Storyteller app surface; keep its contract stable and exclude it from Storyteller refactors.
-- `POST /v1/stream`: SSE streaming of model output for conversation messages; no conversation-message persistence.
+- `POST /v1/stream`: SSE streaming of model output for conversation messages; no conversation-message persistence. A request carrying `tools` is served by the tool-aware path, which emits `creator_tool_call_start` / `creator_tool_call` alongside `token` and is likewise stateless.
 - `POST /v1/creator/stream`: creator SSE streaming, including native tool mode.
 - `POST /v1/creator/stream/continue`: continue a creator native-tool turn.
 - `POST /v1/openrouter/demo`: provision an OpenRouter demo bot.
 
 ## Data Flow Summary
-- Conversation stream requests resolve a bot (explicit bot_id -> conversation bot -> default bot), initialize the OpenAI-compatible client, stream tokens over SSE (`token`, `reasoning`, `ping`, `done` or `error` events), and write nothing to conversation-message tables.
+- Conversation stream requests resolve a bot (explicit bot_id -> conversation bot -> default bot), initialize the OpenAI-compatible client, stream tokens over SSE (`token`, `reasoning`, `ping`, `done` or `error` events), and write nothing to conversation-message tables. Tools are a capability of a request, not of a surface: any stream may carry them.
 - Rerolls are normal `/v1/stream` requests with frontend-assembled context. The frontend owns message, alternative, and cleanup persistence.
 - Creator stream paths may persist to creator-specific tables (`creator_messages` / `conversation_messages`) and are separate from conversation-message persistence.
 
