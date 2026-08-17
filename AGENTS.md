@@ -17,6 +17,7 @@
 ## API Surface (Relay)
 - `GET /healthz`: health check.
 - `GET /auth/test`: validate auth + bot access.
+- `POST /v1/chat/completions`: **external-consumer** OpenAI-compatible passthrough (proxy API key auth, not Storyteller JWT). Not part of the Storyteller app surface; keep its contract stable and exclude it from Storyteller refactors.
 - `POST /v1/stream`: SSE streaming of model output for conversation messages; no conversation-message persistence.
 - `POST /v1/creator/stream`: creator SSE streaming, including native tool mode.
 - `POST /v1/creator/stream/continue`: continue a creator native-tool turn.

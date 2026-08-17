@@ -689,6 +689,11 @@ async def health_check():
     return {"status": "ok"}
 
 
+# EXTERNAL CONSUMER ENDPOINT — NOT part of the Storyteller app surface.
+# This OpenAI-compatible passthrough serves external clients (authenticated by
+# proxy API key, not a Storyteller Supabase JWT). Its request/response contract,
+# auth, and transform behavior must stay stable. Storyteller refactors (e.g. the
+# conversation-foundation endpoint convergence) must leave this endpoint alone.
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request):
     try:
