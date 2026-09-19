@@ -7,7 +7,8 @@ from typing import Any, AsyncGenerator, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openai_service import openai_service
+from openai_service import OpenAIService, openai_service
+from continuation_stream import stream_continuation_turn
 
 log = logging.getLogger("relay.tools")
 
@@ -22,11 +23,14 @@ class ToolStreamRequest(BaseModel):
     mode: Literal["text", "native_tools"] = "text"
     tools: list[dict[str, Any]] = Field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = None
+    tool_protocol: Literal["continuation_v1"] | None = None
 
     @model_validator(mode="after")
     def validate_native_tools(self):
         if self.mode == "native_tools" and not self.tools:
             raise ValueError("tools are required when mode is native_tools")
+        if self.tool_protocol and not self.tools and self.tool_choice not in (None, "none"):
+            raise ValueError("tool_choice requires tools")
         return self
 
 
@@ -160,9 +164,29 @@ async def stream_tool_turn(
     max_tokens: int | None,
     bot: dict[str, Any],
     completion_kwargs: dict[str, Any] | None = None,
+    service: OpenAIService | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     stream_id = request_payload.stream_id or f"tool-stream-{int(time.time() * 1000)}"
     completion_kwargs = completion_kwargs or {}
+    if request_payload.tool_protocol == "continuation_v1":
+        continuation = stream_continuation_turn(
+            stream_id=stream_id,
+            messages=request_payload.messages,
+            tools=request_payload.tools,
+            tool_choice=request_payload.tool_choice,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            bot=bot,
+            completion_kwargs=completion_kwargs,
+            service=service,
+        )
+        try:
+            async for event in continuation:
+                yield event
+        finally:
+            await continuation.aclose()
+        return
     content_parts: list[str] = []
     final_tool_calls: dict[int, dict[str, Any]] = {}
     has_emitted_tool_call_start = False

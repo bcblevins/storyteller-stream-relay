@@ -39,30 +39,22 @@ The service is built with **FastAPI** and designed to be stateless and scalable.
 * **Rate Limiting:** Includes basic in-memory rate limiting to prevent abuse.
 * **CORS Management:** specialized handling to support secure cross-origin requests from the Storyteller frontend.
 
-## Creator Session Native Tools
+## Client-owned tool loops
 
-Creator sessions now support a relay-managed native tool loop with real upstream `tools` usage.
+All application generations use `POST /v1/stream`. The relay executes one provider
+round; the app executes tools, appends results, and requests further rounds.
+The former Creator-specific endpoints have been removed.
 
-* `POST /v1/creator/stream`
-  * Default behavior stays the same for plain creator text streaming.
-  * When `mode` is `"native_tools"`, the relay accepts `messages` whose `content` is either a plain string or an ordered array of native content blocks such as `text`, `tool_use`, and `tool_result`.
-  * The relay forwards that creator message history upstream as the prompt source of truth, apart from normal provider-format translation, and does not reconstruct tool turns.
-* `POST /v1/creator/stream/continue`
-  * Continues the same creator native-tool turn using the provided `messages` history as-is.
-  * Legacy fields like `decision`, `tool_call`, `tool_result`, and `feedback` may still be sent for telemetry, but they no longer modify prompt history.
+Opt in with `tool_protocol: "continuation_v1"` for a complete assistant message in
+the terminal `done` event, including ordered tool calls and provider-required
+continuation data. This also works for text-only requests. See the
+[protocol contract](docs/continuation-protocol.md) for payloads, failure behavior,
+compatibility limits, and test instructions.
 
-### Native-tool SSE events
-
-* `creator_tool_call_start`
-  * JSON payload with nullable `tool_name`, emitted as soon as upstream tool-call generation begins.
-* `creator_tool_call`
-  * JSON payload with `stream_id`, `status`, `mode`, a normalized `tool_call` object (`id`, `name`, `arguments`, `raw_arguments`), plus legacy flat fields (`tool_call_id`, `tool_name`, `arguments`, `raw_arguments`) for compatibility, optional `assistant_content`, `finish_reason`, and optional `usage`.
-* `token`
-  * Final assistant summary text after the tool loop is complete, or direct assistant text if no tool call is needed.
-* `done`
-  * JSON payload with `stream_id`, `status` (`awaiting_tool_approval` or `completed`), `mode`, `finish_reason`, and optional `usage`.
-* `error`
-  * JSON payload with clean upstream/provider failure details. Tool capability gating is not done in the relay for v1.
+Requests without the opt-in retain the existing `token`, `reasoning`,
+`tool_call_start`, `tool_call`, and terminal event formats. The legacy tool path
+still allows only one returned call and reports `awaiting_tool_approval`; new
+callers should use the protocol above. No path writes application data.
 
 ## 🛠️ Tech Stack
 

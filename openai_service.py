@@ -81,13 +81,16 @@ class OpenAIService:
             f"'context_size': {sanitized_config.get('context_size')}\n"
         )
 
-    async def initialize_with_config(self, api_key: str, base_url: Optional[str] = None):
+    async def initialize_with_config(
+        self, api_key: str, base_url: Optional[str] = None, *, max_retries: Optional[int] = None,
+    ):
         """Initialize client with specific configuration"""
         try:
             normalized_base_url = normalize_completion_base_url(base_url)
             self.client = AsyncOpenAI(
                 api_key=api_key,
-                base_url=normalized_base_url if normalized_base_url else "https://api.deepseek.com/v1"
+                base_url=normalized_base_url if normalized_base_url else "https://api.deepseek.com/v1",
+                **({"max_retries": max_retries} if max_retries is not None else {}),
             )
             self.initialized = True
             logger.info(
@@ -184,16 +187,16 @@ class OpenAIService:
         Stream a chat completion that may include tool calls.
         """
         self._ensure_initialized()
-
+        stream = None
         try:
             stream = await self.client.chat.completions.create(**_chat_completion_kwargs(
                 model=model,
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=tools,
-                tool_choice=tool_choice,
-                parallel_tool_calls=parallel_tool_calls,
+                **({"tools": tools} if tools else {}),
+                **({"tool_choice": tool_choice} if tool_choice is not None else {}),
+                **({"parallel_tool_calls": parallel_tool_calls} if parallel_tool_calls is not None else {}),
                 stream=True,
                 **kwargs
             ))
@@ -212,13 +215,18 @@ class OpenAIService:
                     continue
 
                 choice = choices[0]
-                delta = self._dump_openai_model(getattr(choice, "delta", None)) or {}
+                # Keep the provider's continuation fields separate from the
+                # display-only reasoning string. Nulls inside signed/opaque
+                # reasoning details must not be discarded during serialization.
+                delta = self._dump_openai_model(getattr(choice, "delta", None), exclude_none=False) or {}
                 tool_calls = delta.get("tool_calls") or []
                 content = delta.get("content")
                 reasoning = self._extract_reasoning_delta(delta)
                 finish_reason = getattr(choice, "finish_reason", None)
 
                 payload = {
+                    "assistant_delta": delta,
+                    "provider_model": getattr(chunk, "model", None),
                     "content": content,
                     "reasoning": reasoning,
                     "tool_calls": tool_calls,
@@ -226,7 +234,7 @@ class OpenAIService:
                     "usage": usage,
                     "error": None,
                 }
-                if content or reasoning or tool_calls or finish_reason or usage:
+                if delta or finish_reason or usage:
                     yield payload
 
         except RateLimitError as e:
@@ -244,6 +252,9 @@ class OpenAIService:
         except Exception as e:
             self._log_error_with_context("create_chat_completion_tool_stream", e, bot_config)
             yield {"content": None, "tool_calls": None, "error": f"Unexpected error: {e}"}
+        finally:
+            if stream is not None and callable(getattr(stream, "close", None)):
+                await stream.close()
 
     def _extract_tool_call_start(self, value: Any) -> Optional[Dict[str, Any]]:
         event_type = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
@@ -258,15 +269,15 @@ class OpenAIService:
         name = content_block.get("name")
         return {"tool_name": name if isinstance(name, str) and name else None}
 
-    def _dump_openai_model(self, value: Any) -> Any:
+    def _dump_openai_model(self, value: Any, *, exclude_none: bool = True) -> Any:
         if value is None:
             return None
         if isinstance(value, dict):
             return value
         if isinstance(value, list):
-            return [self._dump_openai_model(item) for item in value]
+            return [self._dump_openai_model(item, exclude_none=exclude_none) for item in value]
         if hasattr(value, "model_dump"):
-            return value.model_dump(exclude_none=True)
+            return value.model_dump(exclude_none=exclude_none)
         return value
 
     def _extract_reasoning_delta(self, value: Any) -> Optional[str]:

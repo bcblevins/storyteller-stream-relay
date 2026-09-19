@@ -14,7 +14,7 @@ from tool_stream import (
     ToolStreamRequest,
     stream_tool_turn,
 )
-from openai_service import openai_service
+from openai_service import OpenAIService, openai_service
 from auth import verify_jwt
 from settings import settings
 from request_transforms import (
@@ -264,10 +264,11 @@ async def _stream_conversation_tool_mode(
         api_key = bot.get("openrouter_key")
     base_url = normalize_completion_base_url(bot.get("access_path"))
 
-    try:
-        await openai_service.initialize_with_config(api_key=api_key, base_url=base_url)
-    except Exception as e:
-        raise HTTPException(500, f"Failed to init OpenAI client: {e}")
+    if tool_payload.tool_protocol is None:
+        try:
+            await openai_service.initialize_with_config(api_key=api_key, base_url=base_url)
+        except Exception as e:
+            raise HTTPException(500, f"Failed to init OpenAI client: {e}")
 
     model = bot.get("model", "deepseek-chat")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
@@ -298,22 +299,45 @@ async def _stream_conversation_tool_mode(
     )
 
     async def event_gen():
-        async for event in stream_tool_turn(
+        # A continuation request must not borrow another request's credentials.
+        # Own its client until the generator ends; retries belong to the app.
+        owns_service = stream_payload.tool_protocol == "continuation_v1"
+        service = OpenAIService() if owns_service else openai_service
+        try:
+            if owns_service:
+                await service.initialize_with_config(
+                    api_key=api_key, base_url=base_url, max_retries=0,
+                )
+        except Exception:
+            yield {"event": "error", "data": _serialize_sse_data({
+                "error": "Failed to initialize provider client", "stream_id": stream_id,
+                **({"tool_protocol": "continuation_v1"} if owns_service else {}),
+            })}
+            return
+        generation = stream_tool_turn(
             stream_payload,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             bot=bot,
             completion_kwargs=completion_kwargs,
-        ):
-            if await request.is_disconnected():
-                log.info(
-                    "Client disconnected during conversation tool turn - stream_id: %s",
-                    stream_id,
-                )
-                break
-
-            yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
+            **({"service": service} if owns_service else {}),
+        )
+        try:
+            async for event in generation:
+                if await request.is_disconnected():
+                    log.info(
+                        "Client disconnected during conversation tool turn - stream_id: %s",
+                        stream_id,
+                    )
+                    break
+                yield {"event": event["event"], "data": _serialize_sse_data(event["data"])}
+        finally:
+            try:
+                await generation.aclose()
+            finally:
+                if owns_service and service.client is not None:
+                    await service.client.close()
 
     return EventSourceResponse(event_gen(), ping=10, media_type="text/event-stream")
 
@@ -573,11 +597,13 @@ async def stream(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(400, "JSON body must be an object")
 
-    # A request that carries tools needs the tool-aware stream; everything else
-    # takes the plain token path.
-    if payload.get("tools"):
+    # The opt-in protocol also serves text-only rounds with complete terminal
+    # metadata. Unknown protocol versions must fail validation, not downgrade.
+    if payload.get("tools") or payload.get("tool_protocol") is not None:
         try:
-            tool_payload = ToolStreamRequest.model_validate({**payload, "mode": "native_tools"})
+            tool_payload = ToolStreamRequest.model_validate({
+                **payload, "mode": "native_tools" if payload.get("tools") else "text",
+            })
         except ValidationError as e:
             raise HTTPException(400, {"error": "Invalid tool stream request", "details": e.errors()})
         return await _stream_conversation_tool_mode(request, payload, tool_payload)
