@@ -136,7 +136,11 @@ async def stream_continuation_turn(
             if chunk.get("provider_model"):
                 provider_model = chunk["provider_model"]
             delta = chunk.get("assistant_delta") or {}
-            if finish_reason is not None and any(value for value in delta.values()):
+            # Some compatible providers repeat the assistant role on their final
+            # usage chunk. Role-only metadata is not additional generated data.
+            if finish_reason is not None and any(
+                value for field, value in delta.items() if field != "role"
+            ):
                 raise ContinuationProtocolError("Assistant data arrived after the finish reason.")
             accumulator.add(delta)
             if chunk.get("finish_reason"):

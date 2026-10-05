@@ -138,6 +138,38 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         for field in ("tools", "tool_choice", "parallel_tool_calls"):
             self.assertNotIn(field, forwarded)
 
+    async def test_role_only_usage_trailers_preserve_success_and_usage(self):
+        trailer = {"role": "assistant", "content": None, "tool_calls": None,
+                   "refusal": None, "reasoning": ""}
+        for tools in ([], TOOLS):
+            with self.subTest(tools=bool(tools)):
+                delta = {"tool_calls": [call()]} if tools else {"content": "Story"}
+                finish = "tool_calls" if tools else "stop"
+                events, _ = await self.run_round([
+                    chunk(delta, finish),
+                    chunk(trailer, finish, usage={"completion_tokens": 25}),
+                ], tools=tools)
+                terminals = [event for event in events if event["event"] in ("done", "error")]
+                self.assertEqual([event["event"] for event in terminals], ["done"])
+                self.assertEqual(terminals[0]["data"]["usage"], {"completion_tokens": 25})
+                self.assertEqual(terminals[0]["data"]["finish_reason"], finish)
+
+    async def test_role_only_usage_trailer_does_not_obscure_reasoning_truncation(self):
+        usage = {"completion_tokens": 1000, "completion_tokens_details": {"reasoning_tokens": 1000}}
+        events, _ = await self.run_round([
+            chunk({"reasoning": "Plan the story."}, "length"),
+            chunk({"role": "assistant", "content": None}, "length", usage=usage),
+        ], tools=[])
+        terminals = [event for event in events if event["event"] in ("done", "error")]
+        self.assertEqual([event["event"] for event in terminals], ["error"])
+        error = terminals[0]["data"]
+        self.assertEqual(error["error"], "Provider response ended without a complete assistant turn.")
+        self.assertEqual(error["finish_reason"], "length")
+        self.assertEqual(error["usage"], usage)
+        self.assertEqual(error["partial_assistant_message"], {
+            "role": "assistant", "content": None, "reasoning": "Plan the story.",
+        })
+
     async def test_incomplete_invalid_and_conflicting_responses_have_one_error_no_done(self):
         scenarios = {
             "truncated": [chunk({"tool_calls": [call(arguments='{"unfinished":')]}, "length")],
@@ -154,6 +186,10 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             "missing_index": [chunk({"tool_calls": [call(index=None)]}, "tool_calls")],
             "wrong_reason": [chunk({"tool_calls": [call()]}, "stop")],
             "late_content": [chunk({"content": "ready"}, "stop"), chunk({"content": "late"})],
+            "late_reasoning": [chunk({"content": "ready"}, "stop"), chunk({"reasoning": "late"})],
+            "late_tool_call": [chunk({"content": "ready"}, "stop"), chunk({"tool_calls": [call()]})],
+            "conflicting_finish": [chunk({"content": "ready"}, "stop"), chunk({"role": "assistant"}, "length")],
+            "invalid_trailing_role": [chunk({"content": "ready"}, "stop"), chunk({"role": "user"})],
             "bad_details": [chunk({"reasoning_details": "not a list"}, "stop")],
             "provider_error": [chunk({"content": "partial"}), RuntimeError("provider failed")],
         }
