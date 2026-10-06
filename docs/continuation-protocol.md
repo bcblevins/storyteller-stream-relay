@@ -23,6 +23,28 @@ protocol for reliable finish metadata. No-tool requests omit tool parameters
 upstream. With tools, the relay requests `parallel_tool_calls: false` but preserves
 multiple calls if a provider nevertheless returns them.
 
+## Structured output requests
+
+An optional `response_format` is supported on `/v1/stream`, with or without
+`continuation_v1`: either `{"type":"json_object"}` or
+`{"type":"json_schema","json_schema":{"name":"entry","strict":true,"schema":{...}}}`.
+The schema object belongs to the app; the relay validates only this request shape
+(name uses 1–64 ASCII letters, digits, underscores, or hyphens). Invalid formats
+return 400 before a provider call.
+
+OpenRouter receives the requested format plus `provider.require_parameters: true`
+to select supporting endpoints, preserving other routing and reasoning settings.
+Direct DeepSeek receives `json_object` for schema requests because its Chat
+Completions API supports JSON mode, not JSON Schema. Other providers receive the
+requested format unchanged. Unsupported formats fail through the existing provider
+error path; the relay does not retry or silently remove the output contract.
+
+Callers must explicitly instruct JSON output (required for DeepSeek JSON mode),
+reserve output tokens and schema input space, and validate the entire completed
+response against their own schema. Provider enforcement varies. Streaming chunks,
+terminal envelopes, and original assistant content retain their existing shapes;
+the relay does not unwrap Markdown or repair generated JSON.
+
 ## SSE contract
 
 `token`, `reasoning`, and `tool_call_start` are progress only. This protocol does
@@ -100,8 +122,9 @@ env SUPABASE_URL=https://example.invalid SUPABASE_JWT_SECRET=test-only \
 
 Tests cover fragmentation, exact continuation replay, multiple calls, malformed
 streams, terminal metadata, opt-in routing, closure on cancellation/disconnect,
-overlapping request isolation, retry settings, and legacy-path regressions.
-Lead verification: 61 tests passed on Python 3.12.14 with pinned dependencies.
+overlapping request isolation, retry settings, structured-output provider
+translation and SDK HTTP bodies, and legacy-path regressions.
+Lead verification: 70 tests passed on Python 3.12.15 with pinned dependencies.
 
 Primary references:
 
@@ -109,3 +132,6 @@ Primary references:
 - [OpenRouter tool calling](https://openrouter.ai/docs/guides/features/tool-calling)
 - [OpenRouter reasoning details](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 - [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/)
+- [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)
+- [OpenRouter required parameters](https://openrouter.ai/docs/guides/routing/provider-selection#requiring-providers-to-support-all-parameters)
+- [DeepSeek Chat Completions response format](https://api-docs.deepseek.com/api/create-chat-completion/)

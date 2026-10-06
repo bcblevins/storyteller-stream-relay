@@ -1,7 +1,11 @@
 import unittest
+import json
 from types import SimpleNamespace
 
+import httpx
+from openai import AsyncOpenAI
 from openai_service import OpenAIService
+from request_transforms import TransformConfig, build_completion_request_kwargs
 
 
 class _AsyncStream:
@@ -33,6 +37,44 @@ class _FakeClient:
 
 
 class OpenAIServiceReasoningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sdk_serializes_structured_output_and_provider_preferences_into_the_http_body(self):
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "entry", "strict": True, "schema": {"type": "object"},
+        }}
+        for provider in ("openrouter", "deepseek"):
+            with self.subTest(provider=provider):
+                requests = []
+
+                def handle(request):
+                    requests.append(json.loads(request.content))
+                    event = {"id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "model",
+                             "choices": [{"index": 0, "delta": {"content": "{}"}, "finish_reason": "stop"}]}
+                    return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                          content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n")
+
+                async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http_client:
+                    async with AsyncOpenAI(api_key="test-only", base_url="https://example.invalid/v1", http_client=http_client,
+                                           max_retries=0) as client:
+                        service = OpenAIService()
+                        service.initialized = True
+                        service.client = client
+                        kwargs = build_completion_request_kwargs({"response_format": response_format}, provider=provider,
+                                                                 model="model", config=TransformConfig(force_reasoning_enabled=False))
+                        events = [event async for event in service.create_chat_completion_tool_stream(
+                            messages=[{"role": "user", "content": "Return JSON."}], model="model", temperature=0.1,
+                            max_tokens=100, **kwargs,
+                        )]
+                self.assertEqual(len(requests), 1)
+                body = requests[0]
+                self.assertEqual(body["response_format"], response_format if provider == "openrouter" else {"type": "json_object"})
+                if provider == "openrouter":
+                    self.assertEqual(body["provider"], {"require_parameters": True})
+                else:
+                    self.assertNotIn("provider", body)
+                self.assertNotIn("extra_body", body)
+                self.assertTrue(body["stream"])
+                self.assertEqual(events[0]["content"], "{}")
+
     async def test_tool_stream_yields_reasoning_separately_from_content(self):
         chunks = [
             SimpleNamespace(

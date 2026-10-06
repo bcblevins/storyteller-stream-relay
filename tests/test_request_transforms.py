@@ -8,10 +8,60 @@ from request_transforms import (
     build_completion_request_kwargs,
     detect_completion_provider,
     normalize_completion_base_url,
+    validate_response_format,
 )
 
 
 class RequestTransformsTest(unittest.TestCase):
+    def test_structured_output_routes_openrouter_to_supporting_endpoints_without_mutating_request(self):
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "entry", "strict": True, "schema": {"type": "object"},
+        }}
+        payload = {"response_format": response_format, "extra_body": {
+            "provider": {"order": ["example"], "require_parameters": False},
+            "reasoning": {"enabled": False}, "metadata": {"id": "example"},
+            "response_format": {"type": "text"},
+        }}
+        out = build_completion_request_kwargs(payload, provider="openrouter", model="deepseek/example",
+                                              config=TransformConfig(force_reasoning_enabled=False))
+        self.assertEqual(out["response_format"], response_format)
+        self.assertEqual(out["extra_body"], {"provider": {"order": ["example"], "require_parameters": True},
+                                              "reasoning": {"enabled": False}, "metadata": {"id": "example"}})
+        out["response_format"]["json_schema"]["schema"]["type"] = "changed"
+        self.assertEqual(response_format["json_schema"]["schema"]["type"], "object")
+        self.assertFalse(payload["extra_body"]["provider"]["require_parameters"])
+
+    def test_schema_is_translated_to_json_mode_only_for_direct_deepseek(self):
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "entry", "strict": True, "schema": {"type": "object"},
+        }}
+        for provider, expected in (("deepseek", {"type": "json_object"}),
+                                   ("openrouter", response_format), ("openai", response_format)):
+            with self.subTest(provider=provider):
+                out = build_completion_request_kwargs({"response_format": response_format}, provider=provider,
+                                                      model="deepseek-chat", config=TransformConfig(force_reasoning_enabled=False))
+                self.assertEqual(out["response_format"], expected)
+        self.assertEqual(response_format["type"], "json_schema")
+
+    def test_json_mode_is_forwarded_and_omission_preserves_existing_requests(self):
+        for provider in ("openrouter", "deepseek", "openai", None):
+            with self.subTest(provider=provider):
+                out = build_completion_request_kwargs({"response_format": {"type": "json_object"}}, provider=provider,
+                                                      model="model", config=TransformConfig(force_reasoning_enabled=False))
+                self.assertEqual(out["response_format"], {"type": "json_object"})
+                omitted = build_completion_request_kwargs({}, provider=provider, model="model",
+                                                          config=TransformConfig(force_reasoning_enabled=False))
+                self.assertEqual(omitted, {})
+
+    def test_rejects_invalid_structured_output_contracts(self):
+        for value in (None, "json_object", {}, {"type": "unknown"}, {"type": "json_schema"},
+                      {"type": "json_object", "extra": True},
+                      {"type": "json_schema", "json_schema": {"name": "entry", "strict": "true", "schema": {}}},
+                      {"type": "json_schema", "json_schema": {"name": "", "strict": True, "schema": {}}},
+                      {"type": "json_schema", "json_schema": {"name": "entry", "strict": True, "schema": []}}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_response_format(value)
+
     def test_normalize_completion_base_url_leaves_plain_base_url_unchanged(self):
         self.assertEqual(
             normalize_completion_base_url("https://api.openai.com/v1"),

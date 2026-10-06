@@ -25,6 +25,7 @@ from request_transforms import (
     build_completion_request_kwargs,
     detect_completion_provider,
     normalize_completion_base_url,
+    validate_response_format,
 )
 from supabase import (
     get_bot,
@@ -596,6 +597,12 @@ async def stream(request: Request):
 
     if not isinstance(payload, dict):
         raise HTTPException(400, "JSON body must be an object")
+
+    if "response_format" in payload:
+        try:
+            validate_response_format(payload["response_format"])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     # The opt-in protocol also serves text-only rounds with complete terminal
     # metadata. Unknown protocol versions must fail validation, not downgrade.

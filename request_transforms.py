@@ -120,10 +120,44 @@ def build_completion_request_kwargs(
         if isinstance(value, dict):
             extra_body[key] = deepcopy(value)
 
+    if "response_format" in payload:
+        response_format = validate_response_format(payload["response_format"])
+        # Direct DeepSeek supports JSON mode, not JSON Schema. The app remains
+        # responsible for validating its domain schema after generation.
+        if provider == "deepseek" and response_format["type"] == "json_schema":
+            response_format = {"type": "json_object"}
+        kwargs["response_format"] = response_format
+        extra_body.pop("response_format", None)
+        if provider == "openrouter":
+            preferences = extra_body.get("provider")
+            preferences = deepcopy(preferences) if isinstance(preferences, dict) else {}
+            preferences["require_parameters"] = True
+            extra_body["provider"] = preferences
+
     if extra_body:
         kwargs["extra_body"] = extra_body
 
     return kwargs
+
+
+def validate_response_format(value: Any) -> dict[str, Any]:
+    """Validate the optional /v1/stream structured-output contract, not its schema."""
+    if not isinstance(value, dict):
+        raise ValueError("response_format must be an object")
+    if value.get("type") == "json_object" and set(value) == {"type"}:
+        return deepcopy(value)
+    if value.get("type") == "json_schema" and set(value) == {"type", "json_schema"}:
+        specification = value["json_schema"]
+        if (
+            isinstance(specification, dict)
+            and set(specification) == {"name", "strict", "schema"}
+            and isinstance(specification["name"], str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", specification["name"])
+            and isinstance(specification["strict"], bool)
+            and isinstance(specification["schema"], dict)
+        ):
+            return deepcopy(value)
+    raise ValueError("response_format must be json_object or a named json_schema with boolean strict and object schema")
 
 
 def _copy_reasoning_fields(payload: dict[str, Any]) -> dict[str, Any]:

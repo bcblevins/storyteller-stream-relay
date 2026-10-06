@@ -59,6 +59,56 @@ class Request:
 
 
 class ContinuationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_route_structured_output_reaches_the_sdk_and_keeps_the_terminal_envelope(self):
+        response_format = {"type": "json_schema", "json_schema": {
+            "name": "entry", "strict": True, "schema": {"type": "object", "properties": {
+                "title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}},
+                "content": {"type": "string"}}, "required": ["title", "tags", "content"], "additionalProperties": False},
+        }}
+        for provider, base_url, model in (("openrouter", "https://openrouter.ai/api/v1", "deepseek/example"),
+                                          ("deepseek", "https://api.deepseek.com", "deepseek-chat")):
+            with self.subTest(provider=provider):
+                raw = '{"title":"Mara","tags":[],"content":"She keeps the bell."}'
+                upstream = FakeStream([chunk({"content": raw[:10]}), chunk({"content": raw[10:]}, "stop")])
+                create = AsyncMock(return_value=upstream)
+                service = OpenAIService()
+                service.initialized = True
+                service.initialize_with_config = AsyncMock()
+                service.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)), close=AsyncMock())
+                payload = {"bot_id": 9, "messages": [{"role": "user", "content": "Return JSON."}],
+                           "tool_protocol": "continuation_v1", "response_format": response_format}
+                with (
+                    patch("app.verify_jwt", AsyncMock(return_value=("user-1", "test-token"))),
+                    patch("app.resolve_stream_bot", AsyncMock(return_value={"id": 9, "access_key": "key", "model": model,
+                                                                           "access_path": base_url})),
+                    patch("app.OpenAIService", return_value=service),
+                    patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
+                ):
+                    generator = await relay_app.stream(Request(payload))
+                    events = [event async for event in generator]
+                kwargs = create.call_args.kwargs
+                self.assertEqual(kwargs["response_format"], response_format if provider == "openrouter" else {"type": "json_object"})
+                if provider == "openrouter":
+                    self.assertTrue(kwargs["extra_body"]["provider"]["require_parameters"])
+                else:
+                    self.assertNotIn("provider", kwargs.get("extra_body", {}))
+                self.assertNotIn("tools", kwargs)
+                self.assertEqual([event["event"] for event in events], ["token", "token", "done"])
+                self.assertEqual(json.loads(events[-1]["data"])["assistant_message"], {"role": "assistant", "content": raw})
+                self.assertTrue(upstream.closed)
+                service.client.close.assert_awaited_once()
+
+    async def test_route_rejects_invalid_response_format_in_legacy_and_continuation_modes(self):
+        for protocol in (None, "continuation_v1"):
+            with self.subTest(protocol=protocol), patch("app.resolve_stream_bot", AsyncMock()) as resolve:
+                payload = {"messages": [{"role": "user", "content": "Hello"}], "response_format": {"type": "unknown"}}
+                if protocol:
+                    payload["tool_protocol"] = protocol
+                with self.assertRaises(HTTPException) as error:
+                    await relay_app.stream(Request(payload))
+                self.assertEqual(error.exception.status_code, 400)
+                resolve.assert_not_awaited()
+
     async def run_round(self, chunks, messages=None, tools=TOOLS):
         stream = FakeStream(chunks)
         create = AsyncMock(return_value=stream)
