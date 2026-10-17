@@ -9,6 +9,7 @@ from sse_starlette import EventSourceResponse
 import json, time, logging, asyncio, os
 import httpx
 import hmac
+import math
 
 from tool_stream import (
     ToolStreamRequest,
@@ -180,6 +181,18 @@ def resolve_max_tokens(payload: dict, bot: dict, default: int = 1000) -> int | N
     return normalize_max_tokens(raw_value)
 
 
+def resolve_temperature(payload: dict, bot: dict) -> float:
+    return payload.get("temperature", bot.get("temperature", 0.1))
+
+
+def validate_temperature(payload: dict) -> None:
+    if "temperature" not in payload:
+        return
+    value = payload["temperature"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 2:
+        raise HTTPException(400, "temperature must be a finite number between 0 and 2")
+
+
 async def resolve_stream_bot(
     user_id: str,
     auth_token: str,
@@ -274,7 +287,7 @@ async def _stream_conversation_tool_mode(
     model = bot.get("model", "deepseek-chat")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         model = settings.OPENROUTER_DEMO_MODEL
-    temperature = bot.get("temperature", 0.1)
+    temperature = resolve_temperature(payload, bot)
     max_tokens = resolve_max_tokens(payload, bot)
     transform_config = build_transform_config()
     provider = detect_completion_provider(
@@ -400,7 +413,7 @@ async def _stream_conversation(request: Request, payload: dict):
     model = bot.get("model", "deepseek-chat")
     if bot.get("is_openrouter") and bot.get("openrouter_key"):
         model = settings.OPENROUTER_DEMO_MODEL
-    temperature = bot.get("temperature", 0.1)
+    temperature = resolve_temperature(payload, bot)
     max_tokens = resolve_max_tokens(payload, bot)
     provider = detect_completion_provider(
         base_url=base_url,
@@ -597,6 +610,8 @@ async def stream(request: Request):
 
     if not isinstance(payload, dict):
         raise HTTPException(400, "JSON body must be an object")
+
+    validate_temperature(payload)
 
     if "response_format" in payload:
         try:
