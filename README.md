@@ -145,3 +145,26 @@ curl -N \
 ```
 
 Note: forcing reasoning can increase output tokens, latency, and cost.
+
+
+## External system prompt capture
+
+The separate `POST /v1/chat/completions` proxy recognizes `<capture-content/>`
+(or `<capture-content />`) in any message's text, including standard text content
+parts. It removes all markers and attempts one capture of the original system
+text before injection/thinking transforms. User, assistant, tool and developer
+content is not stored. Main application `/v1/stream` requests do not capture.
+
+Configure `PROMPT_CAPTURE_SECRET` with the same value in Fly and Supabase Edge
+Function secrets. The relay posts to `${SUPABASE_URL}/functions/v1/capture-prompt`
+using `X-Prompt-Capture-Secret`. No caller Supabase session is required. Do not
+log this secret or captured text. The helper in `prompt_capture.py` does not use
+the user-JWT REST helpers in `supabase.py`.
+
+Supabase accepts only one globally pending capture; an occupied slot skips the
+new capture. The frontend admin page `/admin/prompt-captures` can copy the prompt,
+save it permanently, or delete it. Save/delete release the slot. Saved prompts
+remain accessible. Empty system text and capture bodies over 1 MiB are skipped.
+Submission has a three-second deadline and never fails generation on storage
+errors. A provider failure can still leave a captured request. There is no retry
+queue, and requests without the marker make no capture network call.

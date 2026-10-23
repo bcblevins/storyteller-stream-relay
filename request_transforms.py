@@ -529,3 +529,42 @@ def apply_system_thinking_tag_transform(payload: dict[str, Any], config: Transfo
     if control:
         out[_THINKING_CONTROL_KEY] = control
     return out
+
+
+_CAPTURE_MARKER = re.compile(r"<capture-content\s*/>")
+
+
+def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    """Strip external capture controls and preserve original system text boundaries."""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return dict(payload), False, []
+    detected = False
+    cleaned_messages = []
+    system_messages = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            cleaned_messages.append(message)
+            continue
+        text_parts = []
+
+        def clean(text):
+            nonlocal detected
+            stripped, count = _CAPTURE_MARKER.subn("", text)
+            detected = detected or count > 0
+            text_parts.append(stripped)
+            return stripped
+
+        content = message.get("content")
+        if isinstance(content, str):
+            content = clean(content)
+        elif isinstance(content, list):
+            content = [
+                {**part, "text": clean(part["text"])}
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+                else part for part in content
+            ]
+        cleaned_messages.append({**message, "content": content} if "content" in message else dict(message))
+        if message.get("role") == "system" and text_parts:
+            system_messages.append({"message_index": index, "text_parts": text_parts})
+    return {**payload, "messages": cleaned_messages}, detected, system_messages

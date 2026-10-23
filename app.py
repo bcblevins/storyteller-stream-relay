@@ -18,7 +18,9 @@ from tool_stream import (
 from openai_service import OpenAIService, openai_service
 from auth import verify_jwt
 from settings import settings
+from prompt_capture import submit_prompt_capture
 from request_transforms import (
+    extract_prompt_capture,
     TransformConfig,
     apply_provider_request_transforms,
     apply_system_injection_tag_transform,
@@ -130,30 +132,6 @@ def build_transform_config() -> TransformConfig:
         enable_system_thinking_tag=settings.ENABLE_SYSTEM_THINKING_TAG,
         system_thinking_tag_name=settings.SYSTEM_THINKING_TAG_NAME,
     )
-
-
-def _last_message_tail(payload: dict, tail_len: int = 100) -> str:
-    messages = payload.get("messages")
-    if not isinstance(messages, list) or not messages:
-        return ""
-
-    last_msg = messages[-1]
-    if not isinstance(last_msg, dict):
-        return ""
-
-    content = last_msg.get("content")
-    if isinstance(content, str):
-        return content[-tail_len:]
-
-    if isinstance(content, list):
-        text_parts: list[str] = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                text_parts.append(part.get("text"))
-        joined = "\n".join(text_parts)
-        return joined[-tail_len:]
-
-    return ""
 
 
 def check_rate_limit(user_id: str, limit=5, window=60):
@@ -514,7 +492,10 @@ async def chat_completions_proxy(request: Request):
         raise HTTPException(400, "JSON body must be an object")
 
     upstream_key = verify_proxy_api_key(request)
+    payload, capture_requested, system_messages = extract_prompt_capture(payload)
     model = str(payload.get("model") or "")
+    if capture_requested:
+        await submit_prompt_capture(model, system_messages)
     transform_config = build_transform_config()
     transformed_payload = apply_system_injection_tag_transform(
         payload=payload,
@@ -530,12 +511,7 @@ async def chat_completions_proxy(request: Request):
         model=model,
         config=transform_config,
     )
-    last_tail = _last_message_tail(transformed_payload, 100)
-    log.info(
-        "chat/completions transformed last-message tail (len=%d): %s",
-        len(last_tail),
-        last_tail,
-    )
+    log.info("chat/completions request prepared: capture_requested=%s", capture_requested)
 
     headers = {
         "Authorization": f"Bearer {upstream_key}",

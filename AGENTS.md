@@ -18,7 +18,7 @@
 ## API Surface (Relay)
 - `GET /healthz`: health check.
 - `GET /auth/test`: validate auth + bot access.
-- `POST /v1/chat/completions`: **external-consumer** OpenAI-compatible passthrough (proxy API key auth, not Storyteller JWT). Not part of the Storyteller app surface; keep its contract stable and exclude it from Storyteller refactors.
+- `POST /v1/chat/completions`: **external-consumer** OpenAI-compatible passthrough (proxy API key auth, not Storyteller JWT). Not part of the Storyteller app surface; keep its contract stable and exclude it from Storyteller refactors. `<capture-content/>` in any message text opts into best-effort system prompt capture through Supabase; the marker is stripped before existing transforms.
 - `POST /v1/stream`: the only generation endpoint. SSE streaming of model output; persists nothing. A request carrying `tools` is served by the tool-aware path, which emits `tool_call_start` / `tool_call` alongside `token`.
   - `tool_protocol: "continuation_v1"` opts into the terminal assistant envelope described in `docs/continuation-protocol.md`, for tool or text-only rounds. Requests without it retain the legacy payload shapes and one-call behavior.
   - Optional `response_format` requests JSON mode or JSON Schema output; `request_transforms.py` translates provider capabilities. The app validates its domain output schema.
@@ -31,10 +31,11 @@
 
 ## Environment Variables
 - Required: `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `SUPABASE_REST_URL`, `SUPABASE_ANON_KEY`.
+- Optional external diagnostics: `PROMPT_CAPTURE_SECRET` authenticates submissions to the Supabase `capture-prompt` Edge Function.
 - Optional CORS: `CORS_EXTRA_ORIGINS`, `CORS_ALLOW_ORIGIN_REGEX`.
 
 ## Behavior and Safety Notes
 - Preserve SSE event names and payload shapes (`token`, `reasoning`, `ping`, `done`, `error`).
 - Emit exactly one terminal event: `done` on success or `error` on failure. On client disconnect, stop and emit nothing.
-- The relay does not write application data. It has no message-persistence path at all — do not reintroduce one.
+- Application generation endpoints have no message-persistence path. The separate external endpoint can submit opt-in system prompt diagnostics to Supabase; capture retention and admin operations belong to Supabase and the frontend.
 - Avoid logging secrets (API keys, raw JWTs).

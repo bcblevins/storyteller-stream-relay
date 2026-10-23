@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     # Optional GLM passthrough feature flags (safe defaults keep existing app behavior unchanged)
     GLM_PROXY_API_KEY: Optional[str] = None
+    PROMPT_CAPTURE_SECRET: Optional[str] = None
     FORCE_REASONING_ENABLED: bool = True
     FORCE_REASONING_EFFORT: Optional[str] = None
     FORCE_REASONING_MODEL_PATTERNS: str = "*"
