@@ -531,17 +531,32 @@ def apply_system_thinking_tag_transform(payload: dict[str, Any], config: Transfo
     return out
 
 
-_CAPTURE_MARKER = re.compile(r"<capture-content\s*/>")
+_CAPTURE_MARKER = re.compile(
+    r"""<capture-content(?:\s+user\s*=\s*(?:"(?P<user_double>[^"<]*)"|'(?P<user_single>[^'<]*)'))?\s*/>"""
+)
 
 
 def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
-    """Strip external capture controls and preserve original system text boundaries."""
+    """Strip capture controls; optionally replace a literal name in captured system text."""
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return dict(payload), False, []
     detected = False
+    user_name = None
     cleaned_messages = []
     system_messages = []
+
+    def remove_marker(match):
+        nonlocal detected, user_name
+        detected = True
+        if user_name is None:
+            candidate = match.group("user_double")
+            if candidate is None:
+                candidate = match.group("user_single")
+            if candidate:
+                user_name = candidate
+        return ""
+
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             cleaned_messages.append(message)
@@ -549,9 +564,7 @@ def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], boo
         text_parts = []
 
         def clean(text):
-            nonlocal detected
-            stripped, count = _CAPTURE_MARKER.subn("", text)
-            detected = detected or count > 0
+            stripped = _CAPTURE_MARKER.sub(remove_marker, text)
             text_parts.append(stripped)
             return stripped
 
@@ -567,4 +580,11 @@ def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], boo
         cleaned_messages.append({**message, "content": content} if "content" in message else dict(message))
         if message.get("role") == "system" and text_parts:
             system_messages.append({"message_index": index, "text_parts": text_parts})
+    if user_name is not None:
+        # Normalize only the detached capture copy, after scanning every message:
+        # the marker can occur after the system messages it controls.
+        system_messages = [
+            {**message, "text_parts": [part.replace(user_name, "{{user}}") for part in message["text_parts"]]}
+            for message in system_messages
+        ]
     return {**payload, "messages": cleaned_messages}, detected, system_messages

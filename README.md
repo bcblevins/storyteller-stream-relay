@@ -155,6 +155,16 @@ parts. It removes all markers and attempts one capture of the original system
 text before injection/thinking transforms. User, assistant, tool and developer
 content is not stored. Main application `/v1/stream` requests do not capture.
 
+An optional `user` attribute, e.g. `<capture-content user="Eryndor"/>`, replaces
+every literal, case-sensitive occurrence of that name in captured system text
+with `{{user}}`. Names in forwarded messages stay unchanged; only capture tags
+are removed. Single or double quotes and whitespace around `=` are supported.
+With multiple markers, the first nonempty `user` value in message/text-part order
+applies to all captured system text, including earlier messages. Plain markers
+and empty `user` values do not select a name. The attribute value is matched
+literally, without XML entity decoding. Unsupported or malformed attributes
+are left untouched and do not request a capture.
+
 Configure `PROMPT_CAPTURE_SECRET` with the same value in Fly and Supabase Edge
 Function secrets. The relay posts to `${SUPABASE_URL}/functions/v1/capture-prompt`
 using `X-Prompt-Capture-Secret`. No caller Supabase session is required. Do not

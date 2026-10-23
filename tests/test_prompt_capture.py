@@ -55,6 +55,78 @@ class CaptureTransformTests(unittest.TestCase):
         self.assertEqual(extract_prompt_capture({"messages": None}), ({"messages": None}, False, []))
 
 
+    def test_user_attribute_normalizes_all_system_text_without_changing_forwarded_names(self):
+        for marker in ('<capture-content user="Eryndor"/>', "<capture-content user='Eryndor'/>",
+                       '<capture-content user = "Eryndor" />'):
+            for role in ("system", "user", "assistant", "tool", "developer"):
+                with self.subTest(marker=marker, role=role):
+                    payload = {"messages": [
+                        {"role": "system", "content": "  Eryndor greets Eryndor. eryndor stays lowercase.\n"},
+                        {"role": "system", "content": [{"type": "text", "text": "Eryndor's actions"},
+                            {"type": "image_url", "image_url": {"url": "Eryndor"}},
+                            {"type": "text", "text": "Eryndor again."}]},
+                        {"role": role, "content": "Eryndor" + marker},
+                    ]}
+                    original = deepcopy(payload)
+                    cleaned, detected, system = extract_prompt_capture(payload)
+                    self.assertTrue(detected)
+                    self.assertEqual(payload, original)
+                    self.assertEqual(cleaned["messages"][0], payload["messages"][0])
+                    self.assertEqual(cleaned["messages"][1], payload["messages"][1])
+                    self.assertEqual(cleaned["messages"][2]["content"], "Eryndor")
+                    self.assertEqual(system[0]["text_parts"], ["  {{user}} greets {{user}}. eryndor stays lowercase.\n"])
+                    self.assertEqual(system[1]["text_parts"], ["{{user}}'s actions", "{{user}} again."])
+                    self.assertEqual(len(system), 3 if role == "system" else 2)
+                    if role == "system":
+                        self.assertEqual(system[2]["text_parts"], ["{{user}}"])
+
+    def test_user_attribute_in_array_text_uses_first_nonempty_value_request_wide(self):
+        payload = {"messages": [
+            {"role": "system", "content": "Eryndor and Lyra"},
+            {"role": "user", "content": [
+                {"type": "text", "text": '<capture-content/><capture-content user=""/>'},
+                {"type": "text", "text": '<capture-content user="Eryndor"/>Eryndor'},
+                {"type": "text", "text": "<capture-content user='Lyra'/>Lyra"},
+            ]},
+            {"role": "system", "content": "Lyra then Eryndor"},
+        ]}
+        cleaned, detected, system = extract_prompt_capture(payload)
+        self.assertTrue(detected)
+        self.assertEqual(system, [{"message_index": 0, "text_parts": ["{{user}} and Lyra"]},
+                                  {"message_index": 2, "text_parts": ["Lyra then {{user}}"]}])
+        self.assertEqual([part["text"] for part in cleaned["messages"][1]["content"]], ["", "Eryndor", "Lyra"])
+
+    def test_user_replacement_is_literal_and_case_sensitive(self):
+        payload = {"messages": [
+            {"role": "system", "content": "A.* A.*'s a.* Another"},
+            {"role": "user", "content": '<capture-content user="A.*"/>'},
+        ]}
+        cleaned, _, system = extract_prompt_capture(payload)
+        self.assertEqual(system[0]["text_parts"], ["{{user}} {{user}}'s a.* Another"])
+        self.assertEqual(cleaned["messages"][0]["content"], "A.* A.*'s a.* Another")
+
+    def test_empty_user_or_plain_marker_does_not_replace_text(self):
+        for marker in ('<capture-content/>', '<capture-content user=""/>', "<capture-content user=''/>"):
+            with self.subTest(marker=marker):
+                cleaned, detected, system = extract_prompt_capture({"messages": [
+                    {"role": "system", "content": "Eryndor {{user}}" + marker},
+                ]})
+                self.assertTrue(detected)
+                self.assertEqual(system[0]["text_parts"], ["Eryndor {{user}}"])
+                self.assertEqual(cleaned["messages"][0]["content"], "Eryndor {{user}}")
+
+    def test_malformed_or_unsupported_user_attributes_do_not_trigger(self):
+        for marker in ('<capture-content user=Eryndor/>', '<capture-content user="Eryndor\'/>',
+                       '<capture-content username="Eryndor"/>', '<capture-content user="Eryndor" extra="x"/>',
+                       '<capture-content user="Eryndor" user="Lyra"/>'):
+            with self.subTest(marker=marker):
+                payload = {"messages": [{"role": "system", "content": "Eryndor"}, {"role": "user", "content": marker}]}
+                cleaned, detected, system = extract_prompt_capture(payload)
+                self.assertFalse(detected)
+                self.assertEqual(cleaned, payload)
+                self.assertEqual(system[0]["text_parts"], ["Eryndor"])
+
+
 class CaptureSubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.messages = [{"message_index": 0, "text_parts": ["private prompt"]}]
@@ -150,6 +222,40 @@ class ExternalCaptureEndpointTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(response.body), {"answer": "ok"})
                 submit.assert_awaited_once_with("model", [{"message_index": 0, "text_parts": ["original<injection>move</injection>"]}])
                 self.assertNotIn("<capture-content", json.dumps(forwarded))
+
+    async def test_named_capture_submits_macro_but_forwards_original_names_in_both_modes(self):
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                payload = {"model": "model", "stream": stream, "messages": [
+                    {"role": "system", "content": "Eryndor greets Eryndor."},
+                    {"role": "user", "content": '<capture-content user="Eryndor"/>Eryndor enters.'},
+                ]}
+                forwarded = []
+                class Client:
+                    async def __aenter__(self): return self
+                    async def __aexit__(self, *args): pass
+                    async def aclose(self): pass
+                    async def post(self, url, **kwargs):
+                        forwarded.append(kwargs["json"])
+                        return httpx.Response(200, json={"answer": "ok"})
+                    def build_request(self, method, url, **kwargs):
+                        forwarded.append(kwargs["json"])
+                        return httpx.Request(method, url, json=kwargs["json"])
+                    async def send(self, request, **kwargs):
+                        return httpx.Response(200, content=b"data: ok\n\n")
+                with (patch("app.verify_proxy_api_key", return_value="proxy-key"),
+                      patch("app.submit_prompt_capture", AsyncMock()) as submit,
+                      patch("app.httpx.AsyncClient", return_value=Client())):
+                    response = await relay_app.chat_completions_proxy(self.request(payload))
+                    if stream:
+                        self.assertEqual([chunk async for chunk in response.body_iterator], [b"data: ok\n\n"])
+                    else:
+                        self.assertEqual(json.loads(response.body), {"answer": "ok"})
+                    submit.assert_awaited_once_with("model", [{"message_index": 0, "text_parts": ["{{user}} greets {{user}}."]}])
+                    self.assertEqual(forwarded[0]["messages"], [
+                        {"role": "system", "content": "Eryndor greets Eryndor."},
+                        {"role": "user", "content": "Eryndor enters."},
+                    ])
 
     async def test_unauthorized_request_does_not_capture(self):
         with patch("app.verify_proxy_api_key", side_effect=HTTPException(401)), patch("app.submit_prompt_capture", AsyncMock()) as submit:
