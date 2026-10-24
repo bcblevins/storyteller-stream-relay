@@ -531,6 +531,77 @@ def apply_system_thinking_tag_transform(payload: dict[str, Any], config: Transfo
     return out
 
 
+_SYSTEM_EXTENSION_BLOCK = re.compile(r"<system-extension>(.*?)</system-extension>", re.DOTALL)
+
+
+def apply_system_extension_tag_transform(payload: dict[str, Any]) -> dict[str, Any]:
+    """Move the first complete external extension block to the end of system text."""
+    out = dict(payload)
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return out
+
+    selected = None
+    for message_index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            candidates = [(None, content)]
+        elif isinstance(content, list):
+            candidates = [
+                (index, part["text"]) for index, part in enumerate(content)
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+            ]
+        else:
+            continue
+        for part_index, text in candidates:
+            match = _SYSTEM_EXTENSION_BLOCK.search(text)
+            if match:
+                selected = (message_index, part_index, text, match)
+                break
+        if selected is not None:
+            break
+
+    if selected is None:
+        return out
+    message_index, part_index, text, match = selected
+    extension = match.group(1)
+    if "<system-extension>" in extension:
+        return out
+    system_index = next((index for index in range(len(messages) - 1, -1, -1)
+                         if isinstance(messages[index], dict) and messages[index].get("role") == "system"), None)
+    if extension.strip() and system_index is not None and not isinstance(messages[system_index].get("content"), (str, list)):
+        # Do not discard the extension or overwrite unsupported system content.
+        return out
+
+    updated_messages = list(messages)
+    source_message = messages[message_index]
+    cleaned = text[:match.start()] + text[match.end():]
+    if part_index is None:
+        cleaned_content = cleaned
+    else:
+        cleaned_content = list(source_message["content"])
+        cleaned_content[part_index] = {**cleaned_content[part_index], "text": cleaned}
+    updated_messages[message_index] = {**source_message, "content": cleaned_content}
+
+    if extension.strip():
+        if system_index is None:
+            updated_messages.insert(0, {"role": "system", "content": extension})
+        else:
+            system_message = updated_messages[system_index]
+            content = system_message["content"]
+            if isinstance(content, str):
+                content = content + ("\n\n" if content else "") + extension
+            else:
+                has_text = any(isinstance(part, dict) and part.get("type") == "text"
+                               and isinstance(part.get("text"), str) and part["text"] for part in content)
+                content = [*content, {"type": "text", "text": ("\n\n" if has_text else "") + extension}]
+            updated_messages[system_index] = {**system_message, "content": content}
+    out["messages"] = updated_messages
+    return out
+
+
 _CAPTURE_MARKER = re.compile(
     r"""<capture-content(?:\s+user\s*=\s*(?:"(?P<user_double>[^"<]*)"|'(?P<user_single>[^'<]*)'))?\s*/>"""
 )

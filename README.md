@@ -147,20 +147,42 @@ curl -N \
 Note: forcing reasoning can increase output tokens, latency, and cost.
 
 
+## External system extensions
+
+On `POST /v1/chat/completions`, the first complete, case-sensitive
+`<system-extension>...</system-extension>` block in message/text-part order is
+removed from its source and appended to the last system message, separated by a
+blank line. Multiline contents and surrounding text are preserved. Multipart
+system content receives a new text part at its end. If there is no system
+message, a new one is prepended. The original request object is not mutated.
+
+Only that first block is consumed; later occurrences stay unchanged. An empty
+or whitespace-only first block is removed and consumes the opportunity, without
+appending instructions or creating a system message. Blocks must be wholly in a
+single string or standard text content part; attributes, nested extension tags,
+and cross-part blocks are unsupported. An unclosed block is left untouched.
+Unsupported last-system content is left unchanged rather than overwritten.
+
+The external transformation order is system extension, capture, injection,
+thinking, then provider mapping. Captures therefore include the extended system
+text, and an optional capture `user` replacement applies to the extension too.
+Existing injection and thinking behavior runs afterward. Application `/v1/stream` requests do not process system extensions.
+
 ## External system prompt capture
 
 The separate `POST /v1/chat/completions` proxy recognizes `<capture-content/>`
 (or `<capture-content />`) in any message's text, including standard text content
-parts. It removes all markers and attempts one capture of the original system
-text before injection/thinking transforms. User, assistant, tool and developer
-content is not stored. Main application `/v1/stream` requests do not capture.
+parts. It removes all markers and attempts one capture of system text after
+system extension and before injection/thinking transforms. Other message text
+is not stored unless explicitly promoted by a system extension. Main application `/v1/stream` requests do not capture.
 
 An optional `user` attribute, e.g. `<capture-content user="Eryndor"/>`, replaces
 every literal, case-sensitive occurrence of that name in captured system text
 with `{{user}}`. Names in forwarded messages stay unchanged; only capture tags
 are removed. Single or double quotes and whitespace around `=` are supported.
 With multiple markers, the first nonempty `user` value in message/text-part order
-applies to all captured system text, including earlier messages. Plain markers
+after system-extension processing applies to all captured system text, including
+earlier messages. Plain markers
 and empty `user` values do not select a name. The attribute value is matched
 literally, without XML entity decoding. Unsupported or malformed attributes
 are left untouched and do not request a capture.

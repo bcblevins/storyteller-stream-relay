@@ -21,6 +21,7 @@ from settings import settings
 from prompt_capture import submit_prompt_capture
 from request_transforms import (
     extract_prompt_capture,
+    apply_system_extension_tag_transform,
     TransformConfig,
     apply_provider_request_transforms,
     apply_system_injection_tag_transform,
@@ -492,6 +493,7 @@ async def chat_completions_proxy(request: Request):
         raise HTTPException(400, "JSON body must be an object")
 
     upstream_key = verify_proxy_api_key(request)
+    payload = apply_system_extension_tag_transform(payload)
     payload, capture_requested, system_messages = extract_prompt_capture(payload)
     model = str(payload.get("model") or "")
     if capture_requested:
