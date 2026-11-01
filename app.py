@@ -10,6 +10,7 @@ import json, time, logging, asyncio, os
 import httpx
 import hmac
 import math
+from uuid import uuid4
 
 from tool_stream import (
     ToolStreamRequest,
@@ -570,6 +571,66 @@ async def chat_completions_proxy(request: Request):
     except httpx.HTTPError as e:
         log.error("Chat completions passthrough failed: %s", e)
         raise HTTPException(502, "Upstream provider request failed")
+
+
+# External test endpoint: same client protocol and API-key gate as the proxy,
+# with fixed output and no provider calls, prompt transforms, or capture.
+@app.post("/mock/v1/chat/completions")
+async def mock_chat_completions(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "JSON body must be an object")
+
+    verify_proxy_api_key(request)
+    response_text = "This is a mock streamed response."
+    metadata = {
+        "id": f"chatcmpl-mock-{uuid4().hex}",
+        "created": int(time.time()),
+        "model": str(payload.get("model") or "mock-model"),
+    }
+
+    if not payload.get("stream"):
+        return {
+            **metadata,
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }],
+        }
+
+    def format_chunk(delta: dict, finish_reason: str | None = None) -> str:
+        chunk = {
+            **metadata,
+            "object": "chat.completion.chunk",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
+    async def stream_chunks():
+        if await request.is_disconnected():
+            return
+        yield format_chunk({"role": "assistant"})
+        for index, word in enumerate(response_text.split()):
+            if await request.is_disconnected():
+                return
+            yield format_chunk({"content": (" " if index else "") + word})
+        if await request.is_disconnected():
+            return
+        yield format_chunk({}, "stop")
+        if not await request.is_disconnected():
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        stream_chunks(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/auth/test")

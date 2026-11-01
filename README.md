@@ -147,6 +147,33 @@ curl -N \
 Note: forcing reasoning can increase output tokens, latency, and cost.
 
 
+## External mock chat completions
+
+`POST /mock/v1/chat/completions` returns the fixed assistant text
+`This is a mock streamed response.` without calling a model or Supabase. It uses
+the same `Authorization: Bearer <GLM_PROXY_API_KEY>` authentication as the external
+proxy and returns `503` if that key is not configured.
+
+For OpenAI-compatible clients, set the base URL to `<relay-host>/mock/v1` and use
+the usual chat-completions method. The request may include normal `model` and
+`messages` fields; the response echoes the model (default `mock-model`). Messages
+and generation controls are ignored, including prompt-capture markers. No
+request transforms run, no usage counts are generated, and no data is persisted.
+
+With `stream: true`, the endpoint immediately sends OpenAI-compatible SSE
+`data:` frames: an assistant-role chunk, word-sized content chunks, a final
+chunk with `finish_reason: "stop"`, and `data: [DONE]`. There are no artificial
+delays. With `stream` omitted or false, it returns ordinary chat-completion JSON
+containing the same text.
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $GLM_PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock-model","stream":true,"messages":[{"role":"user","content":"Hello"}]}' \
+  http://localhost:8000/mock/v1/chat/completions
+```
+
 ## External system extensions
 
 On `POST /v1/chat/completions`, the first complete, case-sensitive
