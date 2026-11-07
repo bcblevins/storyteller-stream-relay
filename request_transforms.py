@@ -18,6 +18,8 @@ class TransformConfig:
     system_injection_tag_name: str = "injection"
     enable_system_thinking_tag: bool = False
     system_thinking_tag_name: str = "thinking"
+    enable_openrouter_preset_tag: bool = False
+    openrouter_preset_tag_name: str = "openrouter-preset"
 
 
 _OPENAI_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
@@ -119,6 +121,9 @@ def build_completion_request_kwargs(
         value = transformed.get(key)
         if isinstance(value, dict):
             extra_body[key] = deepcopy(value)
+
+    if provider == "openrouter" and "preset" in payload:
+        extra_body["preset"] = deepcopy(payload["preset"])
 
     if "response_format" in payload:
         response_format = validate_response_format(payload["response_format"])
@@ -382,6 +387,63 @@ def _extract_injection_blocks(text: str, tag_name: str) -> tuple[str, list[str]]
     captured: list[str] = [m.strip() for m in pattern.findall(text) if m and m.strip()]
     cleaned = pattern.sub("", text)
     return cleaned, captured
+
+
+def apply_openrouter_preset_tag_transform(
+    payload: dict[str, Any],
+    *,
+    provider: str | None,
+    config: TransformConfig,
+) -> dict[str, Any]:
+    """Consume valid preset tags in system text, keeping explicit request fields."""
+    out = dict(payload)
+    if (provider or "").strip().lower() != "openrouter" or not config.enable_openrouter_preset_tag:
+        return out
+
+    tag_name = config.openrouter_preset_tag_name.strip()
+    messages = out.get("messages")
+    if not tag_name or not isinstance(messages, list):
+        return out
+
+    pattern = re.compile(
+        rf"<\s*{re.escape(tag_name)}\s*>(.*?)<\s*/\s*{re.escape(tag_name)}\s*>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    selected_preset = None
+
+    def consume(match: re.Match[str]) -> str:
+        nonlocal selected_preset
+        slug = match.group(1).strip()
+        if slug.startswith("@preset/"):
+            slug = slug[len("@preset/"):]
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", slug):
+            return match.group(0)
+        selected_preset = f"@preset/{slug}"
+        return ""
+
+    updated_messages = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "system":
+            updated_messages.append(message)
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            content = pattern.sub(consume, content)
+        elif isinstance(content, list):
+            content = [
+                {**part, "text": pattern.sub(consume, part["text"])}
+                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+                else part
+                for part in content
+            ]
+        updated_messages.append({**message, "content": content} if "content" in message else message)
+
+    if selected_preset is not None:
+        out["messages"] = updated_messages
+        extra_body = out.get("extra_body")
+        if "preset" not in out and not (isinstance(extra_body, dict) and "preset" in extra_body):
+            out["preset"] = selected_preset
+    return out
 
 
 def _parse_thinking_control(raw_value: str) -> dict[str, Any] | None:

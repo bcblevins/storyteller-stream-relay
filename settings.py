@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     SYSTEM_INJECTION_TAG_NAME: str = "injection"
     ENABLE_SYSTEM_THINKING_TAG: bool = True
     SYSTEM_THINKING_TAG_NAME: str = "thinking"
+    ENABLE_OPENROUTER_PRESET_TAG: bool = True
+    OPENROUTER_PRESET_TAG_NAME: str = "openrouter-preset"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

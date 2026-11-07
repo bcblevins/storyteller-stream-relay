@@ -25,6 +25,7 @@ from request_transforms import (
     apply_system_extension_tag_transform,
     TransformConfig,
     apply_provider_request_transforms,
+    apply_openrouter_preset_tag_transform,
     apply_system_injection_tag_transform,
     apply_system_thinking_tag_transform,
     build_completion_request_kwargs,
@@ -133,6 +134,8 @@ def build_transform_config() -> TransformConfig:
         system_injection_tag_name=settings.SYSTEM_INJECTION_TAG_NAME,
         enable_system_thinking_tag=settings.ENABLE_SYSTEM_THINKING_TAG,
         system_thinking_tag_name=settings.SYSTEM_THINKING_TAG_NAME,
+        enable_openrouter_preset_tag=settings.ENABLE_OPENROUTER_PRESET_TAG,
+        openrouter_preset_tag_name=settings.OPENROUTER_PRESET_TAG_NAME,
     )
 
 
@@ -275,14 +278,21 @@ async def _stream_conversation_tool_mode(
         model=model,
         is_openrouter=bool(bot.get("is_openrouter")),
     )
+    completion_payload = apply_openrouter_preset_tag_transform(
+        payload={**payload, "messages": messages},
+        provider=provider,
+        config=transform_config,
+    )
     completion_kwargs = build_completion_request_kwargs(
-        payload=payload,
+        payload=completion_payload,
         provider=provider,
         model=model,
         config=transform_config,
     )
     stream_id = tool_payload.stream_id or f"tool-{int(time.time() * 1000)}"
-    stream_payload = tool_payload.model_copy(update={"stream_id": stream_id})
+    stream_payload = tool_payload.model_copy(update={
+        "stream_id": stream_id, "messages": completion_payload["messages"],
+    })
 
     log.info(
         "Conversation tool configuration - provider: %s, model: %s, max_tokens: %s, stream_id: %s",
@@ -351,16 +361,6 @@ async def _stream_conversation(request: Request, payload: dict):
         raise HTTPException(400, "messages is required and must be a non-empty array")
 
     transform_config = build_transform_config()
-    completion_payload = apply_system_injection_tag_transform(
-        payload=payload,
-        config=transform_config,
-    )
-    completion_payload = apply_system_thinking_tag_transform(
-        payload=completion_payload,
-        config=transform_config,
-    )
-    messages = completion_payload["messages"]
-
     log.info(
         "Stream request - User: %s, conversation_id: %s, messages_count: %d",
         user_id,
@@ -400,6 +400,20 @@ async def _stream_conversation(request: Request, payload: dict):
         model=model,
         is_openrouter=bool(bot.get("is_openrouter")),
     )
+    completion_payload = apply_openrouter_preset_tag_transform(
+        payload=payload,
+        provider=provider,
+        config=transform_config,
+    )
+    completion_payload = apply_system_injection_tag_transform(
+        payload=completion_payload,
+        config=transform_config,
+    )
+    completion_payload = apply_system_thinking_tag_transform(
+        payload=completion_payload,
+        config=transform_config,
+    )
+    messages = completion_payload["messages"]
     completion_kwargs = build_completion_request_kwargs(
         payload=completion_payload,
         provider=provider,
@@ -500,6 +514,11 @@ async def chat_completions_proxy(request: Request):
     if capture_requested:
         await submit_prompt_capture(model, system_messages)
     transform_config = build_transform_config()
+    payload = apply_openrouter_preset_tag_transform(
+        payload=payload,
+        provider="openrouter",
+        config=transform_config,
+    )
     transformed_payload = apply_system_injection_tag_transform(
         payload=payload,
         config=transform_config,

@@ -102,6 +102,8 @@ If `FORCE_REASONING_EFFORT` is set, that value is also attached where supported.
 * `SYSTEM_INJECTION_TAG_NAME` (default: `injection`)
 * `ENABLE_SYSTEM_THINKING_TAG` (default: `true`)
 * `SYSTEM_THINKING_TAG_NAME` (default: `thinking`)
+* `ENABLE_OPENROUTER_PRESET_TAG` (default: `true`)
+* `OPENROUTER_PRESET_TAG_NAME` (default: `openrouter-preset`)
 
 Example:
 
@@ -129,6 +131,35 @@ Supported values are `enabled`, `disabled`, effort-only values like `high` or
 `max`, and combined values like `enabled:max`. For OpenRouter this maps to the
 `reasoning` object; for DeepSeek-compatible requests this maps to
 `extra_body.thinking` plus `reasoning_effort` when an effort is supplied.
+
+When `ENABLE_OPENROUTER_PRESET_TAG=true`, OpenRouter requests can select an
+existing preset with a system-message tag:
+
+```xml
+<openrouter-preset>storytelling</openrouter-preset>
+```
+
+The relay also accepts `@preset/storytelling` inside the tag and sends the
+normalized top-level field `"preset": "@preset/storytelling"` to OpenRouter.
+This works on `/v1/chat/completions` and every `/v1/stream` mode, including tools
+and `continuation_v1`. Only system-message strings and text content parts are
+scanned; tags cannot span content parts. Valid tags are removed, and the last
+valid tag wins. Slugs may contain ASCII letters, digits, underscores, and hyphens.
+Invalid, empty, or incomplete tags remain unchanged. Other providers leave the
+tags untouched. The flag and `OPENROUTER_PRESET_TAG_NAME` control tag extraction.
+
+An explicit JSON `preset` field takes priority over tags; the SDK stream path
+also preserves an explicit `extra_body.preset`. Explicit fields are forwarded as
+provided, so use the full `@preset/` prefix. The selected model is preserved.
+Request parameters override preset defaults: the stream path still sends the
+resolved bot/request temperature and token limit, and reasoning transforms still
+apply. To let a preset choose the model, configure the model as `@preset/slug`
+instead. Preset selection does not create or update presets. See
+[OpenRouter's preset documentation](https://openrouter.ai/docs/guides/features/presets).
+
+On the external proxy, preset extraction runs after system extension and prompt
+capture, and before injection/thinking transforms. Captured system text therefore
+includes the preset tag, consistent with the existing transform controls.
 
 ### Usage Example
 
