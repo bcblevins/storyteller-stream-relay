@@ -126,6 +126,53 @@ class CaptureTransformTests(unittest.TestCase):
                 self.assertEqual(cleaned, payload)
                 self.assertEqual(system[0]["text_parts"], ["Eryndor"])
 
+    def test_persona_mode_captures_only_the_first_body_and_combines_with_user(self):
+        text = (
+            "private preamble\n<Alex O'Neil's Persona>\n  Alex meets <place>Lyra</place>.\n"
+            "</Alex O'Neil's Persona><UserPersona>private user text</UserPersona>"
+            "<Lyra's Persona>another persona</Lyra's Persona>"
+        )
+        for marker in ('<capture-content mode="persona" user="Alex"/>',
+                       """<capture-content user='Alex' mode = 'persona' />"""):
+            with self.subTest(marker=marker):
+                payload = {"messages": [
+                    {"role": "system", "content": "other system instructions"},
+                    {"role": "system", "content": [
+                        {"type": "text", "text": text},
+                        {"type": "text", "text": "<Later's Persona>later text</Later's Persona>"},
+                    ]},
+                    {"role": "user", "content": "continue<capture-content/>" + marker},
+                ]}
+                cleaned, detected, system = extract_prompt_capture(payload)
+                self.assertTrue(detected)
+                self.assertEqual(system, [{
+                    "message_index": 1,
+                    "text_parts": ["\n  {{user}} meets <place>Lyra</place>.\n"],
+                }])
+                self.assertEqual(cleaned["messages"][:2], payload["messages"][:2])
+                self.assertEqual(cleaned["messages"][2]["content"], "continue")
+
+    def test_persona_mode_requires_a_matching_close_in_the_same_system_text_part(self):
+        payload = {"messages": [
+            {"role": "system", "content": [
+                {"type": "text", "text": "<Alex's Persona>one</Lyra's Persona>"},
+                {"type": "text", "text": "</Alex's Persona><Alex's Persona>two<Alex's Persona>"},
+            ]},
+            {"role": "user", "content": "<Alex's Persona>user text</Alex's Persona><capture-content mode='persona'/>"},
+        ]}
+        cleaned, detected, system = extract_prompt_capture(payload)
+        self.assertTrue(detected)
+        self.assertEqual(system, [])
+        self.assertEqual(cleaned["messages"][0], payload["messages"][0])
+        self.assertEqual(cleaned["messages"][1]["content"], "<Alex's Persona>user text</Alex's Persona>")
+
+    def test_unsupported_and_duplicate_capture_modes_do_not_trigger(self):
+        for marker in ('<capture-content mode="other"/>', '<capture-content mode=persona/>',
+                       '<capture-content mode="persona" mode="persona"/>'):
+            with self.subTest(marker=marker):
+                payload = {"messages": [{"role": "user", "content": marker}]}
+                self.assertEqual(extract_prompt_capture(payload), (payload, False, []))
+
 
 class CaptureSubmissionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

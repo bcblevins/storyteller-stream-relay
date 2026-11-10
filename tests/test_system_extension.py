@@ -168,6 +168,21 @@ class SystemExtensionEndpointTests(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "<capture-content/><system-extension>new system</system-extension>"}]})
         submit.assert_awaited_once_with("model", [{"message_index": 0, "text_parts": ["new system"]}])
 
+    async def test_persona_capture_submits_only_the_body_of_an_extended_system_prompt(self):
+        extension = "<Alex's Persona>Persona text</Alex's Persona><UserPersona>Private user text</UserPersona>"
+        user_text = f'<capture-content mode="persona"/><system-extension>{extension}</system-extension>Go'
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                forwarded, submit = await self.forward({"model": "model", "stream": stream, "messages": [
+                    {"role": "system", "content": "Base instructions"},
+                    {"role": "user", "content": user_text},
+                ]})
+                submit.assert_awaited_once_with("model", [{"message_index": 0, "text_parts": ["Persona text"]}])
+                self.assertEqual(forwarded["messages"], [
+                    {"role": "system", "content": "Base instructions\n\n" + extension},
+                    {"role": "user", "content": "Go"},
+                ])
+
     async def test_authentication_happens_before_extension_processing(self):
         with (patch("app.verify_proxy_api_key", side_effect=HTTPException(401)),
               patch("app.apply_system_extension_tag_transform") as transform):

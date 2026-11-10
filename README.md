@@ -245,6 +245,14 @@ and empty `user` values do not select a name. The attribute value is matched
 literally, without XML entity decoding. Unsupported or malformed attributes
 are left untouched and do not request a capture.
 
+Use `<capture-content mode="persona"/>` to capture only the body of the first
+complete persona block, for example `<Alex's Persona>Body</Alex's Persona>`.
+The tags must have the same case-sensitive name and appear in one system text
+part. The capture preserves the body's whitespace and excludes the tags and
+any following UserPersona section. If the first block is blank or no complete
+block is found, nothing is stored. The mode applies to the whole request and
+can be combined with `user`, which replaces the name after the body is extracted.
+
 Configure `PROMPT_CAPTURE_SECRET` with the same value in Fly and Supabase Edge
 Function secrets. The relay posts to `${SUPABASE_URL}/functions/v1/capture-prompt`
 using `X-Prompt-Capture-Secret`. No caller Supabase session is required. Do not

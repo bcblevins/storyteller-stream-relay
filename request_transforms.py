@@ -664,30 +664,53 @@ def apply_system_extension_tag_transform(payload: dict[str, Any]) -> dict[str, A
     return out
 
 
-_CAPTURE_MARKER = re.compile(
-    r"""<capture-content(?:\s+user\s*=\s*(?:"(?P<user_double>[^"<]*)"|'(?P<user_single>[^'<]*)'))?\s*/>"""
-)
+_CAPTURE_ATTRIBUTE = re.compile(r"""\s+(user|mode)\s*=\s*(?:"([^"<]*)"|'([^'<]*)')""")
+_CAPTURE_MARKER = re.compile(rf"<capture-content(?P<attributes>(?:{_CAPTURE_ATTRIBUTE.pattern}){{0,2}})\s*/>")
+_PERSONA_TAG = re.compile(r"<(?P<closing>/)?(?P<name>[^/<>][^<>]*)'s Persona>")
+
+
+def _first_persona_capture(system_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for message in system_messages:
+        for part in message["text_parts"]:
+            openings: dict[str, list[int]] = {}
+            first_span = None
+            for tag in _PERSONA_TAG.finditer(part):
+                name = tag["name"]
+                if not tag["closing"]:
+                    openings.setdefault(name, []).append(tag.end())
+                elif openings.get(name):
+                    start = openings[name].pop()
+                    if first_span is None or start < first_span[0]:
+                        first_span = (start, tag.start())
+            if first_span is not None:
+                start, end = first_span
+                return [{"message_index": message["message_index"], "text_parts": [part[start:end]]}]
+    return []
 
 
 def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
-    """Strip capture controls; optionally replace a literal name in captured system text."""
+    """Strip capture controls and apply capture options to the detached system text."""
     messages = payload.get("messages")
     if not isinstance(messages, list):
         return dict(payload), False, []
     detected = False
     user_name = None
+    persona_only = False
     cleaned_messages = []
     system_messages = []
 
     def remove_marker(match):
-        nonlocal detected, user_name
+        nonlocal detected, user_name, persona_only
+        attributes = {}
+        for key, double, single in _CAPTURE_ATTRIBUTE.findall(match["attributes"]):
+            value = double or single
+            if key in attributes or (key == "mode" and value != "persona"):
+                return match[0]
+            attributes[key] = value
         detected = True
+        persona_only = persona_only or "mode" in attributes
         if user_name is None:
-            candidate = match.group("user_double")
-            if candidate is None:
-                candidate = match.group("user_single")
-            if candidate:
-                user_name = candidate
+            user_name = attributes.get("user") or None
         return ""
 
     for index, message in enumerate(messages):
@@ -713,6 +736,8 @@ def extract_prompt_capture(payload: dict[str, Any]) -> tuple[dict[str, Any], boo
         cleaned_messages.append({**message, "content": content} if "content" in message else dict(message))
         if message.get("role") == "system" and text_parts:
             system_messages.append({"message_index": index, "text_parts": text_parts})
+    if persona_only:
+        system_messages = _first_persona_capture(system_messages)
     if user_name is not None:
         # Normalize only the detached capture copy, after scanning every message:
         # the marker can occur after the system messages it controls.
