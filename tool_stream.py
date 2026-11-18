@@ -24,6 +24,7 @@ class ToolStreamRequest(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     tool_choice: str | dict[str, Any] | None = None
     tool_protocol: Literal["continuation_v1"] | None = None
+    parallel_tool_calls: bool = Field(default=False, strict=True)
 
     @model_validator(mode="after")
     def validate_native_tools(self):
@@ -174,6 +175,7 @@ async def stream_tool_turn(
             messages=request_payload.messages,
             tools=request_payload.tools,
             tool_choice=request_payload.tool_choice,
+            parallel_tool_calls=request_payload.parallel_tool_calls,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,

@@ -109,7 +109,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(error.exception.status_code, 400)
                 resolve.assert_not_awaited()
 
-    async def run_round(self, chunks, messages=None, tools=TOOLS):
+    async def run_round(self, chunks, messages=None, tools=TOOLS, parallel_tool_calls=False):
         stream = FakeStream(chunks)
         create = AsyncMock(return_value=stream)
         service = OpenAIService()
@@ -119,6 +119,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             messages=messages or [{"role": "user", "content": "Find the harbor."}],
             tools=tools, mode="native_tools" if tools else "text",
             tool_protocol="continuation_v1", stream_id="test-stream",
+            parallel_tool_calls=parallel_tool_calls,
         )
         with patch("continuation_stream.openai_service", service):
             events = [event async for event in stream_tool_turn(
@@ -132,11 +133,12 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         raw = '  {"operation": "list", "query": "波"} '
         first = call(arguments=raw[:12])
         second = call(1, "call-2", "another_tool", '{"ids":[]}')
-        events, _ = await self.run_round([
+        events, forwarded = await self.run_round([
             chunk({"role": "assistant", "content": "Checking. ", "tool_calls": [second, first]}),
             chunk({"content": "One moment.", "tool_calls": [{"index": 0, "function": {"arguments": raw[12:]}}]}, "tool_calls"),
             SimpleNamespace(choices=[], usage={"total_tokens": 12}),
-        ])
+        ], parallel_tool_calls=True)
+        self.assertIs(forwarded["parallel_tool_calls"], True)
         self.assertEqual([event["event"] for event in events], ["token", "tool_call_start", "token", "done"])
         done = events[-1]["data"]
         self.assertEqual(done["tool_protocol"], "continuation_v1")
@@ -178,6 +180,7 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarded["messages"], before)
         self.assertEqual(messages, before)
         self.assertEqual(forwarded["tools"], TOOLS)
+        self.assertIs(forwarded["parallel_tool_calls"], False)
         self.assertEqual(final[-1]["data"]["assistant_message"]["content"], "No entries.")
 
     async def test_text_only_opt_in_has_terminal_metadata_without_tool_parameters(self):

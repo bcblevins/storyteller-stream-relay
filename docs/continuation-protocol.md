@@ -20,8 +20,9 @@ disable SDK automatic retries. The app owns explicit, recorded retry attempts.
 
 Tools are optional: text-only Storyteller/Synthesis rounds can use the same
 protocol for reliable finish metadata. No-tool requests omit tool parameters
-upstream. With tools, the relay requests `parallel_tool_calls: false` but preserves
-multiple calls if a provider nevertheless returns them.
+upstream. Tool requests can set `parallel_tool_calls: true` to allow the provider
+to return multiple calls in one response. The default sent upstream is `false`.
+The relay preserves the provider’s call order in either case.
 
 ## Structured output requests
 

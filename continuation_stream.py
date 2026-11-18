@@ -114,7 +114,7 @@ async def stream_continuation_turn(
     *, stream_id: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
     tool_choice: str | dict[str, Any] | None, model: str, temperature: float,
     max_tokens: int | None, bot: dict[str, Any], completion_kwargs: dict[str, Any],
-    service: OpenAIService | None = None,
+    service: OpenAIService | None = None, parallel_tool_calls: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     accumulator = AssistantAccumulator()
     finish_reason = None
@@ -125,7 +125,7 @@ async def stream_continuation_turn(
         messages=messages, model=model, temperature=temperature,
         max_tokens=max_tokens, bot_config=bot, tools=tools or None,
         tool_choice=(tool_choice or "auto") if tools else None,
-        parallel_tool_calls=False if tools else None, **completion_kwargs,
+        parallel_tool_calls=parallel_tool_calls if tools else None, **completion_kwargs,
     )
     try:
         async for chunk in upstream:
