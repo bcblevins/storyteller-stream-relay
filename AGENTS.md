@@ -23,9 +23,8 @@
 - `POST /v1/stream`: the only generation endpoint. SSE streaming of model output; persists nothing. A request carrying `tools` is served by the tool-aware path, which emits `tool_call_start` / `tool_call` alongside `token`.
   - `tool_protocol: "continuation_v1"` opts into the terminal assistant envelope described in `docs/continuation-protocol.md`, for tool or text-only rounds. Requests without it retain the legacy payload shapes and one-call behavior.
   - Optional `response_format` requests JSON mode or JSON Schema output; `request_transforms.py` translates provider capabilities. The app validates its domain output schema.
-  - A saved bot effort is applied to OpenRouter requests when supported by the effective model. Explicit request reasoning controls and configured forced overrides take precedence.
+  - A saved bot effort is forwarded to OpenRouter as a request preference. Explicit request reasoning controls and configured forced overrides take precedence.
   - Optional `temperature` overrides the selected bot for this request. It must be a finite number from 0 to 2; zero is preserved.
-- `GET /v1/bots/{bot_id}/effort-options`: return adjustable OpenRouter effort levels for the owned bot’s effective model.
 - `POST /v1/openrouter/demo`: provision an OpenRouter demo bot.
 
 ## Data Flow Summary

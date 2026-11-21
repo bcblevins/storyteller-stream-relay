@@ -112,7 +112,8 @@ def build_completion_request_kwargs(
         and _model_matches(model, config.force_reasoning_model_patterns)
     )
     if (
-        provider == "openrouter" and bot_effort is not None and not force_override
+        provider == "openrouter" and not force_override
+        and (bot_effort == "none" or bot_effort in _THINKING_EFFORT_VALUES)
         and _THINKING_CONTROL_KEY not in reasoning_fields
         and not _has_explicit_reasoning_controls(reasoning_fields, "reasoning", "reasoning_effort", "thinking")
     ):

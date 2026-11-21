@@ -74,17 +74,19 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forwarded["messages"], [{"role": "user", "content": "Tell me a story."}])
         rest_post_mock.assert_not_awaited()
 
-    async def test_plain_turn_forwards_supported_off_and_omits_default(self):
-        bot = {"access_path": "https://openrouter.ai/api/v1"}
-        with patch("app.get_effort_options", AsyncMock(return_value=("none", "high"))) as options:
-            _, forwarded, _, _ = await self._run_stream(
-                [], bot_settings={**bot, "reasoning_effort": "none"},
+    async def test_plain_turn_forwards_effort_and_omits_the_default_override(self):
+        bot = {"access_path": "https://openrouter.ai/api/v1", "model": "openrouter/auto"}
+        with patch("app.build_transform_config", return_value=relay_app.TransformConfig(force_reasoning_enabled=False)):
+            events, forwarded, _, _ = await self._run_stream(
+                [{"error": "This model requires reasoning"}],
+                bot_settings={**bot, "reasoning_effort": "none"},
             )
-            self.assertEqual(forwarded["extra_body"]["reasoning"], {"effort": "none"})
-            options.reset_mock()
-            _, _, _, request = await self._run_stream([], bot_settings=bot)
-            self.assertIsNone(request["bot_effort"])
-            options.assert_not_awaited()
+            _, default, _, _ = await self._run_stream([], bot_settings=bot)
+
+        self.assertEqual(forwarded["extra_body"]["reasoning"], {"effort": "none"})
+        self.assertNotIn("reasoning", default.get("extra_body", {}))
+        self.assertEqual([event["event"] for event in events], ["error"])
+        self.assertEqual(json.loads(events[0]["data"]), {"error": "This model requires reasoning"})
 
     async def test_model_error_is_terminal_and_not_followed_by_done(self):
         events, _, rest_post_mock, _ = await self._run_stream([
@@ -240,9 +242,8 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
             "is_openrouter": True, "openrouter_key": "demo",
             "reasoning_effort": "high",
         }
-        with patch("app.get_effort_options", AsyncMock(return_value=("high",))) as options:
-            _, forwarded, _ = await self._run_tool_stream([], bot_settings=bot)
-        options.assert_awaited_once_with(relay_app.settings.OPENROUTER_DEMO_MODEL)
+        _, forwarded, _ = await self._run_tool_stream([], bot_settings=bot)
+        self.assertEqual(forwarded["model"], relay_app.settings.OPENROUTER_DEMO_MODEL)
         self.assertEqual(forwarded["extra_body"]["reasoning"], {"effort": "high"})
 
     async def test_forwards_tools_to_the_provider(self):
