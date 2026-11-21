@@ -19,7 +19,7 @@ class _StreamRequest:
 
 
 class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
-    async def _run_stream(self, chunks, *, payload=None, request=None):
+    async def _run_stream(self, chunks, *, payload=None, request=None, bot_settings=None):
         payload = payload or {
             "conversation_id": 123,
             "messages": [{"role": "user", "content": "Tell me a story."}],
@@ -37,8 +37,9 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
 
         def fake_build_completion_request_kwargs(**kwargs):
             completion_request.update(kwargs)
-            return {}
+            return build_kwargs(**kwargs)
 
+        build_kwargs = relay_app.build_completion_request_kwargs
         with (
             patch("app.verify_jwt", AsyncMock(return_value=("user-1", "token"))),
             patch("app.resolve_stream_bot", AsyncMock(return_value={
@@ -46,6 +47,7 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
                 "access_key": "key",
                 "model": "model",
                 "temperature": 0.2,
+                **(bot_settings or {}),
             })),
             patch("app.openai_service.initialize_with_config", AsyncMock()),
             patch("app.openai_service.create_chat_completion_stream", fake_stream),
@@ -71,6 +73,18 @@ class ConversationStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done_payload, {})
         self.assertEqual(forwarded["messages"], [{"role": "user", "content": "Tell me a story."}])
         rest_post_mock.assert_not_awaited()
+
+    async def test_plain_turn_forwards_supported_off_and_omits_default(self):
+        bot = {"access_path": "https://openrouter.ai/api/v1"}
+        with patch("app.get_effort_options", AsyncMock(return_value=("none", "high"))) as options:
+            _, forwarded, _, _ = await self._run_stream(
+                [], bot_settings={**bot, "reasoning_effort": "none"},
+            )
+            self.assertEqual(forwarded["extra_body"]["reasoning"], {"effort": "none"})
+            options.reset_mock()
+            _, _, _, request = await self._run_stream([], bot_settings=bot)
+            self.assertIsNone(request["bot_effort"])
+            options.assert_not_awaited()
 
     async def test_model_error_is_terminal_and_not_followed_by_done(self):
         events, _, rest_post_mock, _ = await self._run_stream([
@@ -178,7 +192,7 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
     stream in the one way that matters most: it writes nothing.
     """
 
-    async def _run_tool_stream(self, chunks, *, payload=None, request=None):
+    async def _run_tool_stream(self, chunks, *, payload=None, request=None, bot_settings=None):
         payload = payload or {
             "conversation_id": 123,
             "messages": [{"role": "user", "content": "Who rules here?"}],
@@ -205,10 +219,11 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
                 "access_key": "key",
                 "model": "model",
                 "temperature": 0.2,
+                **(bot_settings or {}),
             })),
             patch("app.openai_service.initialize_with_config", AsyncMock()),
             patch("app.openai_service.create_chat_completion_tool_stream", fake_tool_stream),
-            patch("app.build_completion_request_kwargs", side_effect=lambda **kwargs: {}),
+            patch("app.build_completion_request_kwargs", wraps=relay_app.build_completion_request_kwargs),
             patch("app.EventSourceResponse", side_effect=lambda generator, **kwargs: generator),
             patch("supabase._rest_post", AsyncMock()) as rest_post_mock,
         ):
@@ -219,6 +234,16 @@ class ConversationToolStreamTests(unittest.IsolatedAsyncioTestCase):
             events = [event async for event in generator]
 
         return events, forwarded, rest_post_mock
+
+    async def test_tool_turn_forwards_effort_for_the_resolved_demo_model(self):
+        bot = {
+            "is_openrouter": True, "openrouter_key": "demo",
+            "reasoning_effort": "high",
+        }
+        with patch("app.get_effort_options", AsyncMock(return_value=("high",))) as options:
+            _, forwarded, _ = await self._run_tool_stream([], bot_settings=bot)
+        options.assert_awaited_once_with(relay_app.settings.OPENROUTER_DEMO_MODEL)
+        self.assertEqual(forwarded["extra_body"]["reasoning"], {"effort": "high"})
 
     async def test_forwards_tools_to_the_provider(self):
         _, forwarded, _ = await self._run_tool_stream([{"content": "Thinking."}])

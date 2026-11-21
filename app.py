@@ -20,6 +20,7 @@ from openai_service import OpenAIService, openai_service
 from auth import verify_jwt
 from settings import settings
 from prompt_capture import submit_prompt_capture
+from openrouter_effort import EFFORTS, get_effort_options
 from request_transforms import (
     extract_prompt_capture,
     apply_system_extension_tag_transform,
@@ -164,6 +165,20 @@ def resolve_max_tokens(payload: dict, bot: dict, default: int = 1000) -> int | N
     return normalize_max_tokens(raw_value)
 
 
+def resolve_completion_model(bot: dict) -> str:
+    if bot.get("is_openrouter") and bot.get("openrouter_key"):
+        return settings.OPENROUTER_DEMO_MODEL
+    return bot.get("model", "deepseek-chat")
+
+
+async def resolve_bot_effort(bot: dict, provider: str | None, model: str) -> str | None:
+    effort = bot.get("reasoning_effort")
+    if provider != "openrouter" or effort not in EFFORTS or not model:
+        return None
+    options = await get_effort_options(model)
+    return effort if options and effort in options else None
+
+
 def resolve_temperature(payload: dict, bot: dict) -> float:
     return payload.get("temperature", bot.get("temperature", 0.1))
 
@@ -267,9 +282,7 @@ async def _stream_conversation_tool_mode(
         except Exception as e:
             raise HTTPException(500, f"Failed to init OpenAI client: {e}")
 
-    model = bot.get("model", "deepseek-chat")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        model = settings.OPENROUTER_DEMO_MODEL
+    model = resolve_completion_model(bot)
     temperature = resolve_temperature(payload, bot)
     max_tokens = resolve_max_tokens(payload, bot)
     transform_config = build_transform_config()
@@ -288,6 +301,7 @@ async def _stream_conversation_tool_mode(
         provider=provider,
         model=model,
         config=transform_config,
+        bot_effort=await resolve_bot_effort(bot, provider, model),
     )
     stream_id = tool_payload.stream_id or f"tool-{int(time.time() * 1000)}"
     stream_payload = tool_payload.model_copy(update={
@@ -390,9 +404,7 @@ async def _stream_conversation(request: Request, payload: dict):
     except Exception as e:
         raise HTTPException(500, f"Failed to init OpenAI client: {e}")
 
-    model = bot.get("model", "deepseek-chat")
-    if bot.get("is_openrouter") and bot.get("openrouter_key"):
-        model = settings.OPENROUTER_DEMO_MODEL
+    model = resolve_completion_model(bot)
     temperature = resolve_temperature(payload, bot)
     max_tokens = resolve_max_tokens(payload, bot)
     provider = detect_completion_provider(
@@ -419,6 +431,7 @@ async def _stream_conversation(request: Request, payload: dict):
         provider=provider,
         model=model,
         config=transform_config,
+        bot_effort=await resolve_bot_effort(bot, provider, model),
     )
     stream_id = payload.get("stream_id") or f"s-{int(time.time() * 1000)}"
 
@@ -657,6 +670,24 @@ async def auth_test(request: Request, bot_id: int):
     user_id, auth_token = await verify_jwt(request)
     bot = await get_bot(user_id, bot_id, auth_token)
     return {"user_id": user_id, "bot": bot["name"] if "name" in bot else bot["id"]}
+
+
+@app.get("/v1/bots/{bot_id}/effort-options")
+async def bot_effort_options(request: Request, bot_id: int):
+    user_id, auth_token = await verify_jwt(request)
+    bot = await get_bot(user_id, bot_id, auth_token)
+    model = resolve_completion_model(bot)
+    provider = detect_completion_provider(
+        base_url=bot.get("access_path"),
+        model=model,
+        is_openrouter=bool(bot.get("is_openrouter")),
+    )
+    if provider != "openrouter" or not model:
+        return {"efforts": []}
+    options = await get_effort_options(model)
+    if options is None:
+        raise HTTPException(503, "OpenRouter effort options are temporarily unavailable")
+    return {"efforts": options}
 
 
 @app.post("/v1/stream")

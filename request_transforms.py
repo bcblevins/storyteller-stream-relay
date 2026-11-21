@@ -77,7 +77,7 @@ def detect_completion_provider(
     parsed = urlsplit(normalized_base_url or "")
     host = parsed.netloc.lower()
 
-    if "openrouter.ai" in host:
+    if parsed.hostname in {"openrouter.ai", "www.openrouter.ai"}:
         return "openrouter"
     if "anthropic.com" in host:
         return "anthropic"
@@ -103,9 +103,23 @@ def build_completion_request_kwargs(
     provider: str | None,
     model: str,
     config: TransformConfig,
+    bot_effort: str | None = None,
 ) -> dict[str, Any]:
+    reasoning_fields = _copy_reasoning_fields(payload)
+    force_override = (
+        config.force_reasoning_enabled
+        and config.force_reasoning_override
+        and _model_matches(model, config.force_reasoning_model_patterns)
+    )
+    if (
+        provider == "openrouter" and bot_effort is not None and not force_override
+        and _THINKING_CONTROL_KEY not in reasoning_fields
+        and not _has_explicit_reasoning_controls(reasoning_fields, "reasoning", "reasoning_effort", "thinking")
+    ):
+        reasoning_fields["reasoning"] = {"effort": bot_effort}
+
     transformed = apply_provider_request_transforms(
-        payload=_copy_reasoning_fields(payload),
+        payload=reasoning_fields,
         provider=provider or "",
         model=model,
         config=config,
