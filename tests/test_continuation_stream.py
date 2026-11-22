@@ -139,7 +139,10 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(choices=[], usage={"total_tokens": 12}),
         ], parallel_tool_calls=True)
         self.assertIs(forwarded["parallel_tool_calls"], True)
-        self.assertEqual([event["event"] for event in events], ["token", "tool_call_start", "token", "done"])
+        self.assertEqual([event["event"] for event in events], [
+            "token", "tool_call_start", "tool_argument_chunk", "token", "tool_argument_chunk", "done",
+        ])
+        self.assertEqual([event["data"] for event in events if event["event"] == "tool_argument_chunk"], [{}, {}])
         done = events[-1]["data"]
         self.assertEqual(done["tool_protocol"], "continuation_v1")
         self.assertEqual(done["status"], "tool_calls")
@@ -153,6 +156,14 @@ class ContinuationTests(unittest.IsolatedAsyncioTestCase):
             ],
         })
         self.assertNotIn("must-not-be-in-envelope", json.dumps(events))
+
+    async def test_tool_metadata_without_arguments_only_emits_the_start_event(self):
+        events, _ = await self.run_round([
+            chunk({"tool_calls": [call(arguments="")]}),
+            chunk({"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}, "tool_calls"),
+        ])
+        self.assertEqual([event["event"] for event in events], ["tool_call_start", "tool_argument_chunk", "done"])
+        self.assertEqual(events[1]["data"], {})
 
     async def test_reasoning_fields_and_signed_details_replay_without_modification(self):
         details1 = [{"type": "reasoning.text", "id": "r1", "index": 0, "text": "Think ", "signature": None}]

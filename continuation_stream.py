@@ -155,6 +155,8 @@ async def stream_continuation_turn(
                 started_tools = True
                 first = accumulator.calls[min(accumulator.calls)]
                 yield {"event": "tool_call_start", "data": {"tool_name": first["function"].get("name")}}
+            if any((call.get("function") or {}).get("arguments") for call in delta.get("tool_calls") or []):
+                yield {"event": "tool_argument_chunk", "data": {}}
         message = accumulator.complete(finish_reason)
     except Exception as error:
         # CancelledError/GeneratorExit are not caught: disconnect emits nothing.

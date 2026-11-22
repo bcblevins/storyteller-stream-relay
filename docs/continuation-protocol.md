@@ -48,9 +48,11 @@ the relay does not unwrap Markdown or repair generated JSON.
 
 ## SSE contract
 
-`token`, `reasoning`, and `tool_call_start` are progress only. This protocol does
-not emit legacy `tool_call` events. Execute nothing before the successful terminal
-envelope; it is authoritative for content and complete calls.
+`token`, `reasoning`, `tool_call_start`, and `tool_argument_chunk` are progress
+events. The relay emits `tool_argument_chunk` with an empty object for each provider
+chunk containing nonempty function arguments, including chunks that contain
+fragments for multiple calls. Execute tools only after receiving the successful
+terminal envelope, which is authoritative for content and complete calls.
 
 ```json
 {
